@@ -41,7 +41,7 @@ const CAN = {
   lecteur  :{add:false,edit:false,delete:false,manage:false},
 };
 const SNAP_MIN = 5; // granularité drag en minutes
-const PX_PER_MIN = 2; // pixels par minute (zoom timeline)
+const MIN_TIMELINE_W = 360; // largeur minimum de la timeline en px
 
 // ─── Helpers temps ─────────────────────────────────────────────────────────────
 const timeToMin = (t) => { if(!t)return 0; const[h,m]=t.split(":").map(Number); return h*60+(m||0); };
@@ -359,10 +359,18 @@ function PlanningView({monoMachines,multiMachines,jobs,openAdd,openEdit,dateKey,
 
 // ─── Timeline pixel ────────────────────────────────────────────────────────────
 function TimelineGrid({label,machines,jobs,openAdd,openEdit,headerColor,dayStartMin,dayEndMin,dateKey,draggingJob,dragOverMachine,setDragOverMachine,handleDragStart,handleDragEnd,handleDrop,can}){
-  const dayDuration = dayEndMin - dayStartMin;
-  const timelineW   = dayDuration * PX_PER_MIN; // pixels total
+  const wrapperRef  = useRef(null);
+  const [wrapperW, setWrapperW] = useState(0);
+  useEffect(()=>{
+    if(!wrapperRef.current)return;
+    const ro=new ResizeObserver(([e])=>setWrapperW(e.contentRect.width));
+    ro.observe(wrapperRef.current);
+    return()=>ro.disconnect();
+  },[]);
   const LABEL_W     = 90;
   const ROW_H       = 64;
+  const dayDuration = dayEndMin - dayStartMin;
+  const timelineW   = wrapperW > 0 ? Math.max(wrapperW - LABEL_W, MIN_TIMELINE_W) : MIN_TIMELINE_W;
 
   // Marqueurs horaires
   const hourMarkers = [];
@@ -379,8 +387,8 @@ function TimelineGrid({label,machines,jobs,openAdd,openEdit,headerColor,dayStart
   return(
     <div>
       <div style={{padding:"10px 14px",background:headerColor,color:"white",fontWeight:700,fontSize:12}}>{label}</div>
-      <div style={{overflowX:"auto"}}>
-        <div style={{display:"flex",minWidth:LABEL_W+timelineW}}>
+      <div ref={wrapperRef} style={{overflowX:timelineW<=wrapperW-LABEL_W||wrapperW===0?"hidden":"auto"}}>
+        <div style={{display:"flex",width:LABEL_W+timelineW}}>
 
           {/* Colonne labels */}
           <div style={{width:LABEL_W,flexShrink:0,borderRight:"1px solid #F0EDE8"}}>
@@ -397,7 +405,7 @@ function TimelineGrid({label,machines,jobs,openAdd,openEdit,headerColor,dayStart
           </div>
 
           {/* Timeline */}
-          <div style={{position:"relative",width:timelineW,flexShrink:0}}>
+          <div style={{position:"relative",width:timelineW,flexShrink:0,flexGrow:1}}>
 
             {/* En-tête heures */}
             <div style={{height:28,background:"#FAFAF8",borderBottom:"1px solid #F0EDE8",position:"relative"}}>
