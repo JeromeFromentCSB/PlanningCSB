@@ -75,6 +75,29 @@ function getSegment(job,dk,wh){
 }
 function countWorkDays(startDate,endDate,wh){let n=0,d=startDate;while(d<=endDate){if(isWorkingDay(d,wh))n++;d=offsetDate(d,1);}return n;}
 
+// ─── Taux de remplissage ───────────────────────────────────────────────────────
+function computeFillRate(dk,allJobs,machines,wh){
+  const active=machines.filter(m=>m.active!==false);
+  if(!active.length)return null;
+  const w=getWH(dk,wh); if(!w.active)return null;
+  const cap=(w.end-w.start)*60*active.length; if(!cap)return null;
+  const scheduled=allJobs.filter(j=>jobOverlapsDay(j,dk)).reduce((s,j)=>s+getSegment(j,dk,wh).duration,0);
+  return Math.min(100,Math.round((scheduled/cap)*100));
+}
+function fillColor(r){return r>=90?"#EF4444":r>=70?"#F59E0B":"#22C55E";}
+function FillBadge({rate,dark}){
+  if(rate===null||rate===undefined)return null;
+  const c=fillColor(rate);
+  return(
+    <div style={{display:"flex",alignItems:"center",gap:3}}>
+      <div style={{width:30,height:3,borderRadius:99,background:dark?"rgba(255,255,255,0.2)":"#F0EDE8",overflow:"hidden"}}>
+        <div style={{height:"100%",width:`${rate}%`,background:c,borderRadius:99}}/>
+      </div>
+      <span style={{fontSize:10,fontWeight:700,color:c}}>{rate}%</span>
+    </div>
+  );
+}
+
 // ─── App ──────────────────────────────────────────────────────────────────────
 export default function App(){
   const [authUser,     setAuthUser]     = useState(undefined);
@@ -220,10 +243,27 @@ export default function App(){
   const onDrop     =async(machineId,newStartTime,newStartDate)=>{
     if(!draggingJob||!can.edit)return;
     const job=draggingJob;
-    const{endDate,endTime}=computeEnd(newStartDate,newStartTime,job.durationMin,workingHours);
-    const fromM=machines.find(x=>x.id===job.machineId),toM=machines.find(x=>x.id===machineId);
-    await update(ref(db,`jobs/${job.key}`),{machineId,startDate:newStartDate,startTime:newStartTime,endDate,endTime});
-    await logChange("deplacement",`Déplacement "${job.client}" : ${fromM?.label} ${fmtShortFR(job.startDate)} ${fmtTime(job.startTime)} → ${toM?.label} ${fmtShortFR(newStartDate)} ${fmtTime(newStartTime)}`);
+    const fromM=machines.find(x=>x.id===job.machineId);
+    const toM  =machines.find(x=>x.id===machineId);
+
+    // Si la machine change ET que la tâche a un calcul qty/temps unitaire,
+    // recalculer la durée avec le nombre de têtes de la nouvelle machine
+    let newDurationMin=job.durationMin;
+    let durationChanged=false;
+    if(machineId!==job.machineId && job.qty>0 && job.unitTimeMin>0 && toM?.heads){
+      newDurationMin=Math.ceil((job.qty*job.unitTimeMin)/toM.heads);
+      durationChanged=true;
+    }
+
+    const{endDate,endTime}=computeEnd(newStartDate,newStartTime,newDurationMin,workingHours);
+    const updates={machineId,startDate:newStartDate,startTime:newStartTime,endDate,endTime};
+    if(durationChanged){ updates.durationMin=newDurationMin; updates.headsUsed=toM.heads; }
+
+    await update(ref(db,`jobs/${job.key}`),updates);
+
+    let detail=`Déplacement "${job.client}" : ${fromM?.label} ${fmtShortFR(job.startDate)} ${fmtTime(job.startTime)} → ${toM?.label} ${fmtShortFR(newStartDate)} ${fmtTime(newStartTime)}`;
+    if(durationChanged) detail+=` · durée recalculée ${fmtDur(newDurationMin)} (${toM.heads} tête${toM.heads>1?"s":""})`;
+    await logChange("deplacement",detail);
     setDraggingJob(null);setDragOverCell(null);
   };
 
@@ -254,7 +294,7 @@ export default function App(){
           <button onClick={()=>setDateKey(k=>offsetDate(k,view==="semaine"?-7:-1))} style={navBtn}>‹</button>
           <div style={{textAlign:"center",minWidth:150}}>
             {view==="semaine"?<div style={{color:"white",fontSize:11,fontWeight:600}}>Semaine du {fmtShortFR(getMondayKey(dateKey))}</div>
-            :<><div style={{color:"white",fontSize:11,fontWeight:600}}>{fmtDateFR(dateKey)}</div>{isToday(dateKey)&&<div style={{fontSize:10,color:"#81B29A",fontWeight:600}}>Aujourd'hui</div>}</>}
+            :<><div style={{color:"white",fontSize:11,fontWeight:600}}>{fmtDateFR(dateKey)}</div><FillBadge rate={computeFillRate(dateKey,jobsList,machines,workingHours)} dark={true}/>{isToday(dateKey)&&<div style={{fontSize:10,color:"#81B29A",fontWeight:600}}>Aujourd'hui</div>}</>}
           </div>
           <button onClick={()=>setDateKey(k=>offsetDate(k,view==="semaine"?7:1))} style={navBtn}>›</button>
           <button onClick={()=>setDateKey(todayKey())} style={{...navBtn,fontSize:10,width:"auto",padding:"0 8px"}}>Auj.</button>
@@ -551,6 +591,9 @@ function WeekGrid({label,machines,allJobs,weekKeys,workingHours,openAdd,openEdit
               <th key={dk} onClick={()=>onDayClick(dk)} style={{padding:"8px 6px",fontSize:11,color:isToday(dk)?"#E07A5F":"#718096",fontWeight:isToday(dk)?800:600,background:isToday(dk)?"#FFF5F3":"#FAFAF8",borderBottom:"1px solid #F0EDE8",textAlign:"center",cursor:"pointer",borderLeft:"1px solid #F0EDE8",minWidth:110}}>
                 <div>{DAYS_FR[getDayIdx(dk)]}</div>
                 <div style={{fontSize:10,fontWeight:400,color:isToday(dk)?"#E07A5F":"#A0AEC0"}}>{fmtShortFR(dk)}</div>
+                <div style={{display:"flex",justifyContent:"center",marginTop:2}}>
+                  <FillBadge rate={computeFillRate(dk,allJobs,machines,workingHours)} dark={false}/>
+                </div>
               </th>
             ))}
           </tr></thead>
