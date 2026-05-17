@@ -16,7 +16,7 @@ const MACHINES = [
 const DAYS_FR    = ["Dimanche","Lundi","Mardi","Mercredi","Jeudi","Vendredi","Samedi"];
 const DAYS_SHORT = ["Dim","Lun","Mar","Mer","Jeu","Ven","Sam"];
 const MONTHS_FR  = ["janvier","février","mars","avril","mai","juin","juillet","août","septembre","octobre","novembre","décembre"];
-const DEFAULT_WH = { 1:{start:8,end:18,active:true},2:{start:8,end:18,active:true},3:{start:8,end:18,active:true},4:{start:8,end:18,active:true},5:{start:8,end:18,active:true},6:{start:8,end:13,active:false} };
+const DEFAULT_WH = { 0:{start:8,end:18,active:false},1:{start:8,end:18,active:true},2:{start:8,end:18,active:true},3:{start:8,end:18,active:true},4:{start:8,end:18,active:true},5:{start:8,end:18,active:true},6:{start:8,end:13,active:false} };
 const STATUS_COLORS = {
   "En attente":{bg:"#FFF3CD",text:"#856404",border:"#FFDA6A"},
   "En cours"  :{bg:"#D1E7DD",text:"#0F5132",border:"#A3CFBB"},
@@ -53,7 +53,7 @@ const fmtDateFR     = (k)   => { const d=new Date(k+"T12:00:00"); return `${DAYS
 const fmtShortFR    = (k)   => { const d=new Date(k+"T12:00:00"); return `${DAYS_SHORT[d.getDay()]} ${d.getDate()}/${d.getMonth()+1}`; };
 
 // ─── Horaires helpers ──────────────────────────────────────────────────────────
-const getWH = (dk, wh) => wh[getDayIdx(dk)] || DEFAULT_WH[getDayIdx(dk)] || {start:8,end:18,active:true};
+const getWH = (dk, wh) => { const idx=getDayIdx(dk); return {...(DEFAULT_WH[idx]||{start:8,end:18,active:false}), ...(wh[idx]||{})}; };
 const isWorkingDay = (dk, wh) => { const w=getWH(dk,wh); return w && w.active!==false; };
 const nextWorkingDay = (dk, wh) => {
   let d=offsetDate(dk,1); let s=0;
@@ -675,7 +675,7 @@ function RecapView({dayJobs,allJobs,machines,dateKey,workingHours}){
 // ─── Admin ─────────────────────────────────────────────────────────────────────
 function AdminPanel({allUsers,workingHours,onClose}){
   const [tab,setTab]=useState("users");
-  const DN={1:"Lundi",2:"Mardi",3:"Mercredi",4:"Jeudi",5:"Vendredi",6:"Samedi"};
+  const DN={0:"Dimanche",1:"Lundi",2:"Mardi",3:"Mercredi",4:"Jeudi",5:"Vendredi",6:"Samedi"};
   const AH=Array.from({length:15},(_,i)=>i+5);
   const saveH=async(d,f,v)=>await update(ref(db,`settings/workingHours/${d}`),{[f]:v});
   return(
@@ -706,8 +706,8 @@ function AdminPanel({allUsers,workingHours,onClose}){
         {tab==="horaires"&&(
           <>
             <div style={{fontSize:11,color:"#718096",marginBottom:12,background:"#F7F4F0",borderRadius:8,padding:"8px 10px"}}>Définissez les horaires par jour. Ces horaires sont utilisés pour calculer les dates de fin des tâches multi-jours.</div>
-            {[1,2,3,4,5,6].map(di=>{
-              const wh=workingHours[di]||DEFAULT_WH[di]||{start:8,end:18,active:true};
+            {[1,2,3,4,5,6,0].map(di=>{
+              const wh={...DEFAULT_WH[di],...(workingHours[di]||{})};
               return(
                 <div key={di} style={{marginBottom:10,padding:"10px 12px",background:wh.active?"white":"#F7F4F0",borderRadius:10,border:`1.5px solid ${wh.active?"#E2E8F0":"#EDE8E3"}`}}>
                   <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:wh.active?10:0}}>
