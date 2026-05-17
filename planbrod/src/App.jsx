@@ -76,26 +76,53 @@ function getSegment(job,dk,wh){
 function countWorkDays(startDate,endDate,wh){let n=0,d=startDate;while(d<=endDate){if(isWorkingDay(d,wh))n++;d=offsetDate(d,1);}return n;}
 
 // ─── Taux de remplissage ───────────────────────────────────────────────────────
-function computeFillRate(dk,allJobs,machines,wh){
+// ─── Taux de remplissage enrichi ──────────────────────────────────────────────
+function computeFillInfo(dk,allJobs,machines,wh){
   const active=machines.filter(m=>m.active!==false);
   if(!active.length)return null;
   const w=getWH(dk,wh); if(!w.active)return null;
   const cap=(w.end-w.start)*60*active.length; if(!cap)return null;
   const scheduled=allJobs.filter(j=>jobOverlapsDay(j,dk)).reduce((s,j)=>s+getSegment(j,dk,wh).duration,0);
-  return Math.min(100,Math.round((scheduled/cap)*100));
+  return{rate:Math.min(100,Math.round((scheduled/cap)*100)),scheduledMin:scheduled,capacityMin:cap};
 }
+// Gardé pour compatibilité
+function computeFillRate(dk,allJobs,machines,wh){const i=computeFillInfo(dk,allJobs,machines,wh);return i?i.rate:null;}
 function fillColor(r){return r>=90?"#EF4444":r>=70?"#F59E0B":"#22C55E";}
-function FillBadge({rate,dark}){
-  if(rate===null||rate===undefined)return null;
-  const c=fillColor(rate);
+function FillBadge({info,dark}){
+  if(!info)return null;
+  const c=fillColor(info.rate);
   return(
-    <div style={{display:"flex",alignItems:"center",gap:3}}>
+    <div style={{display:"flex",alignItems:"center",gap:4}}>
       <div style={{width:30,height:3,borderRadius:99,background:dark?"rgba(255,255,255,0.2)":"#F0EDE8",overflow:"hidden"}}>
-        <div style={{height:"100%",width:`${rate}%`,background:c,borderRadius:99}}/>
+        <div style={{height:"100%",width:`${info.rate}%`,background:c,borderRadius:99}}/>
       </div>
-      <span style={{fontSize:10,fontWeight:700,color:c}}>{rate}%</span>
+      <span style={{fontSize:10,fontWeight:700,color:c}}>{info.rate}%</span>
+      <span style={{fontSize:10,color:dark?"rgba(255,255,255,0.55)":"#A0AEC0",fontWeight:500}}>{fmtDur(info.scheduledMin)}</span>
     </div>
   );
+}
+
+// ─── Anti-chevauchement ────────────────────────────────────────────────────────
+function findFirstAvailableSlot(machineId,proposedDate,proposedTime,durationMin,excludeKey,allJobsList,wh){
+  const mJobs=allJobsList.filter(j=>j.machineId===machineId&&j.key!==excludeKey);
+  let curDate=proposedDate,curMin=timeToMin(proposedTime),safety=0;
+  while(safety++<90){
+    const w=getWH(curDate,wh);
+    if(!w.active){curDate=nextWorkingDay(curDate,wh);curMin=getWH(curDate,wh).start*60;continue;}
+    const dayStart=w.start*60,dayEnd=w.end*60;
+    if(curMin<dayStart)curMin=dayStart;
+    if(curMin>=dayEnd){curDate=nextWorkingDay(curDate,wh);curMin=getWH(curDate,wh).start*60;continue;}
+    const taskEndOnDay=Math.min(dayEnd,curMin+durationMin);
+    const busy=mJobs
+      .filter(j=>jobOverlapsDay(j,curDate))
+      .map(j=>getSegment(j,curDate,wh))
+      .sort((a,b)=>a.segStart-b.segStart);
+    const conflict=busy.find(b=>curMin<b.segEnd&&taskEndOnDay>b.segStart);
+    if(!conflict)return{startDate:curDate,startTime:minToTime(curMin)};
+    curMin=conflict.segEnd;
+    if(curMin>=dayEnd){curDate=nextWorkingDay(curDate,wh);curMin=getWH(curDate,wh).start*60;}
+  }
+  return{startDate:curDate,startTime:minToTime(curMin)};
 }
 
 // ─── App ──────────────────────────────────────────────────────────────────────
@@ -222,11 +249,21 @@ export default function App(){
   const saveJob=async()=>{
     if(!form.client.trim())return;
     const{key,durationDays,durationH,durationM,...data}=form;
-    const m=machines.find(x=>x.id===data.machineId);
-    const wd=countWorkDays(data.startDate,data.endDate,workingHours);
-    const detail=`"${data.client}" sur ${m?.label}, ${fmtShortFR(data.startDate)} ${fmtTime(data.startTime)} → ${fmtShortFR(data.endDate)} ${fmtTime(data.endTime)} (${wd}j trav.)`;
-    if(modal.type==="add"){await push(ref(db,"jobs"),data);await logChange("ajout",`Ajout ${detail}`);}
-    else{await update(ref(db,`jobs/${key}`),data);await logChange("modification",`Modif ${detail}`);}
+    // Anti-chevauchement : trouver le premier créneau libre
+    const slot=findFirstAvailableSlot(data.machineId,data.startDate,data.startTime,data.durationMin,key||null,jobsList,workingHours);
+    let finalData={...data};
+    let shifted=false;
+    if(slot.startDate!==data.startDate||slot.startTime!==data.startTime){
+      const{endDate,endTime}=computeEnd(slot.startDate,slot.startTime,data.durationMin,workingHours);
+      finalData={...data,startDate:slot.startDate,startTime:slot.startTime,endDate,endTime};
+      shifted=true;
+    }
+    const m=machines.find(x=>x.id===finalData.machineId);
+    const wd=countWorkDays(finalData.startDate,finalData.endDate,workingHours);
+    let detail=`"${finalData.client}" sur ${m?.label}, ${fmtShortFR(finalData.startDate)} ${fmtTime(finalData.startTime)} → ${fmtShortFR(finalData.endDate)} ${fmtTime(finalData.endTime)} (${wd}j trav.)`;
+    if(shifted)detail+=` · décalé automatiquement (chevauchement évité)`;
+    if(modal.type==="add"){await push(ref(db,"jobs"),finalData);await logChange("ajout",`Ajout ${detail}`);}
+    else{await update(ref(db,`jobs/${key}`),finalData);await logChange("modification",`Modif ${detail}`);}
     setModal(null);
   };
   const deleteJob=async(key,job)=>{
@@ -255,13 +292,16 @@ export default function App(){
       durationChanged=true;
     }
 
-    const{endDate,endTime}=computeEnd(newStartDate,newStartTime,newDurationMin,workingHours);
-    const updates={machineId,startDate:newStartDate,startTime:newStartTime,endDate,endTime};
+    // Anti-chevauchement sur la machine cible
+    const slot=findFirstAvailableSlot(machineId,newStartDate,newStartTime,newDurationMin,job.key,jobsList,workingHours);
+    const{endDate,endTime}=computeEnd(slot.startDate,slot.startTime,newDurationMin,workingHours);
+    const updates={machineId,startDate:slot.startDate,startTime:slot.startTime,endDate,endTime};
     if(durationChanged){ updates.durationMin=newDurationMin; updates.headsUsed=toM.heads; }
 
     await update(ref(db,`jobs/${job.key}`),updates);
 
-    let detail=`Déplacement "${job.client}" : ${fromM?.label} ${fmtShortFR(job.startDate)} ${fmtTime(job.startTime)} → ${toM?.label} ${fmtShortFR(newStartDate)} ${fmtTime(newStartTime)}`;
+    let detail=`Déplacement "${job.client}" : ${fromM?.label} ${fmtShortFR(job.startDate)} ${fmtTime(job.startTime)} → ${toM?.label} ${fmtShortFR(slot.startDate)} ${fmtTime(slot.startTime)}`;
+    if(slot.startDate!==newStartDate||slot.startTime!==newStartTime) detail+=` · décalé (chevauchement évité)`;
     if(durationChanged) detail+=` · durée recalculée ${fmtDur(newDurationMin)} (${toM.heads} tête${toM.heads>1?"s":""})`;
     await logChange("deplacement",detail);
     setDraggingJob(null);setDragOverCell(null);
@@ -294,7 +334,7 @@ export default function App(){
           <button onClick={()=>setDateKey(k=>offsetDate(k,view==="semaine"?-7:-1))} style={navBtn}>‹</button>
           <div style={{textAlign:"center",minWidth:150}}>
             {view==="semaine"?<div style={{color:"white",fontSize:11,fontWeight:600}}>Semaine du {fmtShortFR(getMondayKey(dateKey))}</div>
-            :<><div style={{color:"white",fontSize:11,fontWeight:600}}>{fmtDateFR(dateKey)}</div><FillBadge rate={computeFillRate(dateKey,jobsList,machines,workingHours)} dark={true}/>{isToday(dateKey)&&<div style={{fontSize:10,color:"#81B29A",fontWeight:600}}>Aujourd'hui</div>}</>}
+            :<><div style={{color:"white",fontSize:11,fontWeight:600}}>{fmtDateFR(dateKey)}</div><FillBadge info={computeFillInfo(dateKey,jobsList,machines,workingHours)} dark={true}/>{isToday(dateKey)&&<div style={{fontSize:10,color:"#81B29A",fontWeight:600}}>Aujourd'hui</div>}</>}
           </div>
           <button onClick={()=>setDateKey(k=>offsetDate(k,view==="semaine"?7:1))} style={navBtn}>›</button>
           <button onClick={()=>setDateKey(todayKey())} style={{...navBtn,fontSize:10,width:"auto",padding:"0 8px"}}>Auj.</button>
@@ -592,7 +632,7 @@ function WeekGrid({label,machines,allJobs,weekKeys,workingHours,openAdd,openEdit
                 <div>{DAYS_FR[getDayIdx(dk)]}</div>
                 <div style={{fontSize:10,fontWeight:400,color:isToday(dk)?"#E07A5F":"#A0AEC0"}}>{fmtShortFR(dk)}</div>
                 <div style={{display:"flex",justifyContent:"center",marginTop:2}}>
-                  <FillBadge rate={computeFillRate(dk,allJobs,machines,workingHours)} dark={false}/>
+                  <FillBadge info={computeFillInfo(dk,allJobs,machines,workingHours)} dark={false}/>
                 </div>
               </th>
             ))}
