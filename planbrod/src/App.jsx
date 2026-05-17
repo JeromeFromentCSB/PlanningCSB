@@ -296,7 +296,21 @@ export default function App(){
                 <label style={lbl}>Machine</label>
                 <select value={form.machineId||machines[0]?.id} onChange={e=>{
                   const m=machines.find(x=>x.id===e.target.value);
-                  setForm(f=>({...f,machineId:e.target.value,headsUsed:Math.min(f.headsUsed||1,m?.heads||1)}));
+                  const newHeads=m?.heads||1;
+                  setForm(f=>{
+                    const nf={...f,machineId:e.target.value,headsUsed:newHeads};
+                    // Recalcule la durée automatiquement si qty et unitTimeMin sont remplis
+                    if(nf.qty>0&&nf.unitTimeMin>0){
+                      const totMin=Math.ceil((nf.qty*nf.unitTimeMin)/newHeads);
+                      const days=Math.floor(totMin/(8*60)),hours=Math.floor((totMin%(8*60))/60),mins=totMin%60;
+                      const wh=getWH(nf.startDate,workingHours);
+                      const startMin=(wh.start||8)*60;
+                      const st=nf.startTime||minToTime(startMin);
+                      const end=computeEnd(nf.startDate,st,totMin,workingHours);
+                      return{...nf,durationMin:totMin,durationDays:days,durationH:hours,durationM:mins,...end};
+                    }
+                    return nf;
+                  });
                 }} style={sel}>
                   {machines.map(m=><option key={m.id} value={m.id}>{m.label} ({m.heads} tête{m.heads>1?"s":""})</option>)}
                 </select>
