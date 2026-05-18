@@ -24,7 +24,7 @@ const STATUS_COLORS = { "En attente":{bg:"#FFF3CD",text:"#856404",border:"#FFDA6
 const STATUS_LABELS = {"En attente":"En attente","En cours":"En cours","Termine":"Terminé","Urgent":"Urgent"};
 const JOB_COLORS    = ["#E07A5F","#3D405B","#81B29A","#F2CC8F","#6B9AC4","#D4A5A5","#9BB7D4","#C3B1E1","#A8D5BA","#F4A261"];
 const ROLE_LABELS   = {admin:"Administrateur",operateur:"Opérateur",lecteur:"Lecteur"};
-const CAN = { admin:{add:true,edit:true,delete:true,manage:true}, operateur:{add:true,edit:true,delete:false,manage:false}, lecteur:{add:false,edit:false,delete:false,manage:false} };
+const CAN = { admin:{add:true,edit:true,delete:true,manage:true,status:true}, operateur:{add:true,edit:true,delete:false,manage:false,status:true}, lecteur:{add:false,edit:false,delete:false,manage:false,status:true} };
 const SNAP_MIN=5, MIN_TIMELINE=300, LABEL_W=90, ROW_H=68;
 
 // ─── Helpers temps ─────────────────────────────────────────────────────────────
@@ -175,6 +175,7 @@ export default function App(){
   const [showAdmin,    setShowAdmin]    = useState(false);
   const [draggingJob,  setDraggingJob]  = useState(null);
   const [dragOverCell, setDragOverCell] = useState(null);
+  const [contextMenu,  setContextMenu]  = useState(null); // { job, x, y }
   const [loginErr,     setLoginErr]     = useState("");
 
   // ── Auth ──────────────────────────────────────────────────────────
@@ -242,6 +243,12 @@ export default function App(){
     setModal({type:"add"});
   };
   const openEdit=(job)=>{
+    if(role==="lecteur"){
+      // Lecteur : fiche lecture seule avec statut modifiable
+      setForm({...job});
+      setModal({type:"view"});
+      return;
+    }
     if(!can.edit&&!can.delete)return;
     const tot=job.durationMin||0;
     setForm({...job,durationDays:Math.floor(tot/(8*60)),durationH:Math.floor((tot%(8*60))/60),durationM:tot%60,qty:job.qty||0,unitTimeMin:job.unitTimeMin||0,headsUsed:job.headsUsed||1});
@@ -340,7 +347,13 @@ export default function App(){
     setDraggingJob(null);setDragOverCell(null);
   };
 
-  const markAllRead=async()=>{const u={};Object.keys(notifs).forEach(k=>{u[`notifications/${k}/read`]=true;});await update(ref(db),u);};
+  const changeJobStatus=async(job,newStatus)=>{
+    await update(ref(db,`jobs/${job.key}`),{status:newStatus});
+    await logChange("modification",`Statut "${job.client}" → ${STATUS_LABELS[newStatus]} (${MACHINES.find(m=>m.id===job.machineId)?.label||job.machineId})`);
+    setContextMenu(null);
+  };
+  const markAllRead   =async()=>{const u={};Object.keys(notifs).forEach(k=>{u[`notifications/${k}/read`]=true;});await update(ref(db),u);};
+  const deleteAllNotifs=async()=>{ if(!window.confirm("Supprimer toutes les notifications ?"))return; await remove(ref(db,"notifications")); };
   const deleteNotif=async(k)=>remove(ref(db,`notifications/${k}`));
 
   if(authUser===undefined)return<Loader/>;
@@ -348,7 +361,7 @@ export default function App(){
 
   const wh=getWH(dateKey,workingHours);
   const dayActive=wh.active!==false;
-  const dragProps={draggingJob,dragOverCell,setDragOverCell,onDragStart,onDragEnd,onDrop,can};
+  const dragProps={draggingJob,dragOverCell,setDragOverCell,onDragStart,onDragEnd,onDrop,can,onContextMenu:(e,job)=>{e.preventDefault();e.stopPropagation();setContextMenu({job,x:e.clientX,y:e.clientY});}};
   const currentMachine=machines.find(m=>m.id===form.machineId);
 
   return(
@@ -382,12 +395,101 @@ export default function App(){
         </div>
       </div>
 
-      {showNotifs&&role==="admin"&&<NotifPanel notifs={notifsList} onMarkRead={markAllRead} onDelete={deleteNotif} onClose={()=>setShowNotifs(false)}/>}
+      {showNotifs&&role==="admin"&&<NotifPanel notifs={notifsList} onMarkRead={markAllRead} onDelete={deleteNotif} onDeleteAll={deleteAllNotifs} onClose={()=>setShowNotifs(false)}/>}
       {showAdmin &&role==="admin"&&<AdminPanel allUsers={allUsers} workingHours={workingHours} machines={machines} onClose={()=>setShowAdmin(false)}/>}
 
       {view==="planning"&&<PlanningView monoM={monoM} multiM={multiM} dayJobs={dayJobs} dateKey={dateKey} wh={wh} dayActive={dayActive} workingHours={workingHours} machines={machines} openAdd={openAdd} openEdit={openEdit} {...dragProps}/>}
       {view==="semaine" &&<WeekView monoM={monoM} multiM={multiM} allJobs={jobsList} mondayKey={getMondayKey(dateKey)} workingHours={workingHours} machines={machines} openAdd={openAdd} openEdit={openEdit} onDayClick={(dk)=>{setDateKey(dk);setView("planning");}} {...dragProps}/>}
       {view==="recap"   &&<RecapView dayJobs={dayJobs} allJobs={jobsList} machines={machines} dateKey={dateKey} workingHours={workingHours}/>}
+
+      {/* ── Menu contextuel clic droit ── */}
+      {contextMenu&&(
+        <div onClick={()=>setContextMenu(null)} style={{position:"fixed",inset:0,zIndex:2000}}>
+          <div onClick={e=>e.stopPropagation()} style={{position:"fixed",top:Math.min(contextMenu.y,window.innerHeight-220),left:Math.min(contextMenu.x,window.innerWidth-200),background:"white",borderRadius:10,boxShadow:"0 8px 30px rgba(0,0,0,0.18)",padding:8,minWidth:190,zIndex:2001}}>
+            <div style={{fontSize:11,fontWeight:700,color:"#718096",padding:"4px 8px",marginBottom:4,borderBottom:"1px solid #F0EDE8"}}>
+              🎨 Changer le statut
+            </div>
+            <div style={{fontSize:11,fontWeight:600,color:"#2D3748",padding:"4px 8px 8px",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{contextMenu.job.client}</div>
+            {Object.entries(STATUS_LABELS).map(([k,v])=>{
+              const sc=STATUS_COLORS[k];
+              const isCurrent=contextMenu.job.status===k;
+              return(
+                <div key={k} onClick={()=>changeJobStatus(contextMenu.job,k)}
+                  style={{display:"flex",alignItems:"center",gap:8,padding:"7px 10px",borderRadius:7,cursor:isCurrent?"default":"pointer",background:isCurrent?sc.bg:"transparent",marginBottom:2,transition:"background .1s"}}
+                  onMouseEnter={e=>{if(!isCurrent)e.currentTarget.style.background="#F7F4F0";}}
+                  onMouseLeave={e=>{if(!isCurrent)e.currentTarget.style.background="transparent";}}>
+                  <div style={{width:8,height:8,borderRadius:"50%",background:sc.border,flexShrink:0}}/>
+                  <span style={{fontSize:12,fontWeight:isCurrent?700:400,color:isCurrent?sc.text:"#2D3748"}}>{v}</span>
+                  {isCurrent&&<span style={{marginLeft:"auto",fontSize:10,color:sc.text}}>✓ actuel</span>}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* ── Modal vue lecteur (lecture seule + statut) ── */}
+      {modal?.type==="view"&&(
+        <div onClick={()=>setModal(null)} style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:1000,padding:16}}>
+          <div onClick={e=>e.stopPropagation()} style={{background:"white",borderRadius:16,padding:24,width:380,boxShadow:"0 20px 60px rgba(0,0,0,0.25)"}}>
+            {/* Entête */}
+            <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:16}}>
+              <div style={{width:10,height:10,borderRadius:"50%",background:form.couleur,flexShrink:0}}/>
+              <div style={{flex:1}}>
+                <div style={{fontSize:15,fontWeight:700,color:"#1A1A2E"}}>{form.client}</div>
+                {form.description&&<div style={{fontSize:12,color:"#718096"}}>{form.description}</div>}
+              </div>
+              <button onClick={()=>setModal(null)} style={{background:"#F7F4F0",border:"none",borderRadius:7,width:26,height:26,cursor:"pointer",fontSize:14,color:"#718096"}}>×</button>
+            </div>
+
+            {/* Infos en lecture seule */}
+            <div style={{background:"#F7F9FC",borderRadius:10,padding:"12px 14px",marginBottom:14,display:"grid",gridTemplateColumns:"1fr 1fr",gap:"8px 16px"}}>
+              {[
+                {label:"Machine",   value:machines.find(m=>m.id===form.machineId)?.label||form.machineId},
+                {label:"Durée",     value:fmtDur(form.durationMin)},
+                {label:"Début",     value:`${fmtDateFR(form.startDate)} ${fmtTime(form.startTime)}`},
+                {label:"Fin",       value:`${fmtDateFR(form.endDate)} ${fmtTime(form.endTime)}`},
+                ...(form.qty>0?[{label:"Articles", value:`${form.qty} × ${form.unitTimeMin}min`}]:[]),
+              ].map(({label,value})=>(
+                <div key={label}>
+                  <div style={{fontSize:10,fontWeight:600,color:"#A0AEC0",marginBottom:2}}>{label}</div>
+                  <div style={{fontSize:12,fontWeight:600,color:"#2D3748"}}>{value}</div>
+                </div>
+              ))}
+            </div>
+
+            {/* Statut modifiable */}
+            <div style={{marginBottom:16}}>
+              <label style={{fontSize:11,fontWeight:700,color:"#4A5568",display:"block",marginBottom:8}}>🎨 Modifier le statut</label>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6}}>
+                {Object.entries(STATUS_LABELS).map(([k,v])=>{
+                  const sc=STATUS_COLORS[k];
+                  const isCurrent=form.status===k;
+                  return(
+                    <div key={k} onClick={()=>setForm(f=>({...f,status:k}))}
+                      style={{display:"flex",alignItems:"center",gap:7,padding:"8px 10px",borderRadius:8,cursor:"pointer",
+                        border:`2px solid ${isCurrent?sc.border:"#E2E8F0"}`,background:isCurrent?sc.bg:"white",transition:"all .15s"}}
+                      onMouseEnter={e=>{if(!isCurrent)e.currentTarget.style.borderColor=sc.border;}}
+                      onMouseLeave={e=>{if(!isCurrent)e.currentTarget.style.borderColor="#E2E8F0";}}>
+                      <div style={{width:8,height:8,borderRadius:"50%",background:sc.border,flexShrink:0}}/>
+                      <span style={{fontSize:12,fontWeight:isCurrent?700:400,color:isCurrent?sc.text:"#4A5568"}}>{v}</span>
+                      {isCurrent&&<span style={{marginLeft:"auto",fontSize:12}}>✓</span>}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div style={{display:"flex",gap:8}}>
+              <button onClick={()=>setModal(null)} style={{flex:1,padding:"9px",borderRadius:8,border:"1.5px solid #E2E8F0",background:"white",fontWeight:600,cursor:"pointer",fontSize:12,color:"#4A5568"}}>Fermer</button>
+              <button onClick={()=>{ changeJobStatus(form,form.status); setModal(null); }}
+                style={{flex:2,padding:"9px",borderRadius:8,border:"none",background:"#1A1A2E",color:"white",fontWeight:700,cursor:"pointer",fontSize:12}}>
+                ✓ Enregistrer le statut
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ── Modal ── */}
       {modal&&(
@@ -553,7 +655,7 @@ function PlanningView({monoM,multiM,dayJobs,dateKey,wh,dayActive,workingHours,ma
 }
 
 // ─── Timeline pixel ────────────────────────────────────────────────────────────
-function TimelineGrid({label,machines,dayJobs,dateKey,wh,workingHours,openAdd,openEdit,headerColor,draggingJob,dragOverCell,setDragOverCell,onDragStart,onDragEnd,onDrop,can}){
+function TimelineGrid({label,machines,dayJobs,dateKey,wh,workingHours,openAdd,openEdit,headerColor,draggingJob,dragOverCell,setDragOverCell,onDragStart,onDragEnd,onDrop,can,onContextMenu}){
   const wrapRef=useRef(null);
   const [wrapW,setWrapW]=useState(0);
   useEffect(()=>{
@@ -618,6 +720,7 @@ function TimelineGrid({label,machines,dayJobs,dateKey,wh,workingHours,openAdd,op
                     return(
                       <div key={job.key} draggable={can.edit} onDragStart={e=>{e.stopPropagation();onDragStart(job);}} onDragEnd={onDragEnd}
                         onClick={e=>{e.stopPropagation();if(!isDragging)openEdit(job);}}
+                        onContextMenu={e=>onContextMenu(e,job)}
                         title={`${job.client}${job.description?" – "+job.description:""}\n${fmtDateFR(job.startDate)} ${fmtTime(job.startTime)} → ${fmtDateFR(job.endDate)} ${fmtTime(job.endTime)}\n${job.qty?`${job.qty} pièces × ${job.unitTimeMin}min ÷ ${job.headsUsed} têtes = ${fmtDur(job.durationMin)}`:""}`}
                         style={{position:"absolute",left,width:width-2,top:5,bottom:5,background:sc.bg,border:`1.5px solid ${sc.border}`,borderLeft:seg.before?"3px dashed "+job.couleur:`3px solid ${job.couleur}`,borderRight:seg.after?"2px dashed "+sc.border:`1.5px solid ${sc.border}`,borderRadius:`${seg.before?0:6}px ${seg.after?0:6}px ${seg.after?0:6}px ${seg.before?0:6}px`,padding:"3px 5px",overflow:"hidden",cursor:can.edit?(isDragging?"grabbing":"grab"):"pointer",opacity:isGhost?0.25:1,userSelect:"none",zIndex:1,transition:"opacity .15s,box-shadow .1s"}}
                         onMouseEnter={e=>{if(!isDragging&&can.edit)e.currentTarget.style.boxShadow="0 3px 10px rgba(0,0,0,0.18)";e.currentTarget.style.zIndex=10;}}
@@ -657,7 +760,7 @@ function WeekView({monoM,multiM,allJobs,mondayKey,workingHours,machines,openAdd,
   );
 }
 
-function WeekGrid({label,machines,allJobs,weekKeys,workingHours,openAdd,openEdit,headerColor,onDayClick,draggingJob,setDragOverCell,onDragStart,onDragEnd,onDrop,can}){
+function WeekGrid({label,machines,allJobs,weekKeys,workingHours,openAdd,openEdit,headerColor,onDayClick,draggingJob,setDragOverCell,onDragStart,onDragEnd,onDrop,can,onContextMenu}){
   const isDragging=draggingJob!=null;
   return(
     <div>
@@ -697,6 +800,7 @@ function WeekGrid({label,machines,allJobs,weekKeys,workingHours,openAdd,openEdit
                           return(
                             <div key={job.key} draggable={can.edit} onDragStart={e=>{e.stopPropagation();onDragStart(job);}} onDragEnd={onDragEnd}
                               onClick={e=>{e.stopPropagation();if(!isDragging)openEdit(job);}}
+                              onContextMenu={e=>onContextMenu(e,job)}
                               style={{background:sc.bg,border:`1.5px solid ${sc.border}`,borderLeft:seg.before?`3px dashed ${job.couleur}`:`3px solid ${job.couleur}`,borderRadius:6,padding:"3px 6px",cursor:can.edit?"grab":"default",userSelect:"none"}}
                               onMouseEnter={e=>{if(can.edit)e.currentTarget.style.boxShadow="0 2px 8px rgba(0,0,0,0.12)";}}
                               onMouseLeave={e=>{e.currentTarget.style.boxShadow="none";}}>
@@ -1067,12 +1171,16 @@ function UsersTab({allUsers}){
 }
 
 // ─── Notifs ────────────────────────────────────────────────────────────────────
-function NotifPanel({notifs,onMarkRead,onDelete,onClose}){
+function NotifPanel({notifs,onMarkRead,onDelete,onDeleteAll,onClose}){
   return(
-    <div style={{position:"fixed",top:62,right:12,width:370,maxHeight:"70vh",background:"white",borderRadius:14,boxShadow:"0 8px 40px rgba(0,0,0,0.18)",zIndex:900,display:"flex",flexDirection:"column",overflow:"hidden"}}>
+    <div style={{position:"fixed",top:62,right:12,width:390,maxHeight:"72vh",background:"white",borderRadius:14,boxShadow:"0 8px 40px rgba(0,0,0,0.18)",zIndex:900,display:"flex",flexDirection:"column",overflow:"hidden"}}>
       <div style={{padding:"11px 14px",background:"#1A1A2E",color:"white",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
-        <span style={{fontWeight:700,fontSize:12}}>🔔 Modifications</span>
-        <div style={{display:"flex",gap:7}}><button onClick={onMarkRead} style={{background:"rgba(255,255,255,0.15)",color:"white",border:"none",borderRadius:6,padding:"3px 9px",cursor:"pointer",fontSize:11}}>Tout lire</button><button onClick={onClose} style={{background:"rgba(255,255,255,0.15)",color:"white",border:"none",borderRadius:6,width:22,height:22,cursor:"pointer",fontSize:13}}>×</button></div>
+        <span style={{fontWeight:700,fontSize:12}}>🔔 Modifications ({notifs.length})</span>
+        <div style={{display:"flex",gap:6,alignItems:"center"}}>
+          <button onClick={onMarkRead} title="Marquer tout comme lu" style={{background:"rgba(255,255,255,0.15)",color:"white",border:"none",borderRadius:6,padding:"3px 8px",cursor:"pointer",fontSize:11}}>✓ Tout lire</button>
+          <button onClick={onDeleteAll} title="Supprimer toutes les notifications" style={{background:"rgba(239,68,68,0.3)",color:"white",border:"none",borderRadius:6,padding:"3px 8px",cursor:"pointer",fontSize:11}}>🗑 Tout supprimer</button>
+          <button onClick={onClose} style={{background:"rgba(255,255,255,0.15)",color:"white",border:"none",borderRadius:6,width:22,height:22,cursor:"pointer",fontSize:13}}>×</button>
+        </div>
       </div>
       <div style={{overflowY:"auto",flex:1}}>
         {notifs.length===0?<div style={{padding:20,textAlign:"center",color:"#A0AEC0",fontSize:13}}>Aucune notification</div>
