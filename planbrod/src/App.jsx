@@ -19,7 +19,7 @@ const MACHINE_COLORS = ["#E07A5F","#3D405B","#81B29A","#F2CC8F","#6B9AC4","#D4A5
 const DAYS_FR    = ["Dimanche","Lundi","Mardi","Mercredi","Jeudi","Vendredi","Samedi"];
 const DAYS_SHORT = ["Dim","Lun","Mar","Mer","Jeu","Ven","Sam"];
 const MONTHS_FR  = ["janvier","février","mars","avril","mai","juin","juillet","août","septembre","octobre","novembre","décembre"];
-const DEFAULT_WH = { 0:{start:8,end:18,active:false},1:{start:8,end:18,active:true},2:{start:8,end:18,active:true},3:{start:8,end:18,active:true},4:{start:8,end:18,active:true},5:{start:8,end:18,active:true},6:{start:8,end:13,active:false} };
+const DEFAULT_WH = { 0:{start:8,end:18,active:false,breakActive:false,breakStart:720,breakEnd:780},1:{start:8,end:18,active:true,breakActive:false,breakStart:720,breakEnd:780},2:{start:8,end:18,active:true,breakActive:false,breakStart:720,breakEnd:780},3:{start:8,end:18,active:true,breakActive:false,breakStart:720,breakEnd:780},4:{start:8,end:18,active:true,breakActive:false,breakStart:720,breakEnd:780},5:{start:8,end:18,active:true,breakActive:false,breakStart:720,breakEnd:780},6:{start:8,end:13,active:false,breakActive:false,breakStart:720,breakEnd:780} };
 const STATUS_COLORS = { "En attente":{bg:"#FFF3CD",text:"#856404",border:"#FFDA6A"},"En cours":{bg:"#D1E7DD",text:"#0F5132",border:"#A3CFBB"},"Termine":{bg:"#E2E3E5",text:"#41464B",border:"#BCBEBF"},"Urgent":{bg:"#F8D7DA",text:"#842029",border:"#F1AEB5"} };
 const STATUS_LABELS = {"En attente":"En attente","En cours":"En cours","Termine":"Terminé","Urgent":"Urgent"};
 const JOB_COLORS    = ["#E07A5F","#3D405B","#81B29A","#F2CC8F","#6B9AC4","#D4A5A5","#9BB7D4","#C3B1E1","#A8D5BA","#F4A261"];
@@ -52,17 +52,45 @@ const getWH         =(dk,wh)=>{const idx=getDayIdx(dk);return{...(DEFAULT_WH[idx
 const isWorkingDay  =(dk,wh)=>getWH(dk,wh).active!==false;
 const nextWorkingDay=(dk,wh)=>{let d=offsetDate(dk,1),s=0;while(s++<14){if(isWorkingDay(d,wh))return d;d=offsetDate(d,1);}return d;};
 
-// ─── Calcul date/heure de fin ─────────────────────────────────────────────────
+// ─── Périodes de travail (matin + après-midi si pause) ───────────────────────
+function getDayPeriods(dk,wh){
+  const w=getWH(dk,wh);
+  if(!w.active)return[];
+  const s=w.start*60,e=w.end*60;
+  if(w.breakActive&&w.breakStart>s&&w.breakEnd<e&&w.breakEnd>w.breakStart)
+    return[{start:s,end:w.breakStart},{start:w.breakEnd,end:e}];
+  return[{start:s,end:e}];
+}
+// Durée travaillée réelle d'un segment (exclut la pause)
+function getWorkingDuration(segStart,segEnd,w){
+  if(!w.breakActive||!w.breakStart||!w.breakEnd)return Math.max(0,segEnd-segStart);
+  const ov=Math.max(0,Math.min(segEnd,w.breakEnd)-Math.max(segStart,w.breakStart));
+  return Math.max(0,segEnd-segStart-ov);
+}
+
+// ─── Calcul date/heure de fin (pause méridienne prise en compte) ──────────────
 function computeEnd(startDate,startTime,durationMin,wh){
   if(durationMin<=0)return{endDate:startDate,endTime:startTime};
   let rem=durationMin,curDate=startDate,curMin=timeToMin(startTime),safety=0;
-  while(rem>0&&safety++<90){
-    const w=getWH(curDate,wh);
-    if(curDate!==startDate&&w.active===false){curDate=nextWorkingDay(curDate,wh);curMin=getWH(curDate,wh).start*60;continue;}
-    const dayEnd=(w.end||18)*60,avail=Math.max(0,dayEnd-curMin);
-    if(avail===0){const nd=nextWorkingDay(curDate,wh);curDate=nd;curMin=getWH(nd,wh).start*60;continue;}
+  while(rem>0&&safety++<120){
+    if(curDate!==startDate&&!isWorkingDay(curDate,wh)){
+      curDate=nextWorkingDay(curDate,wh);
+      curMin=getDayPeriods(curDate,wh)[0]?.start||getWH(curDate,wh).start*60;
+      continue;
+    }
+    const periods=getDayPeriods(curDate,wh);
+    // Trouver la première période qui n'est pas encore terminée
+    const period=periods.find(p=>p.end>curMin);
+    if(!period){
+      curDate=nextWorkingDay(curDate,wh);
+      curMin=getDayPeriods(curDate,wh)[0]?.start||getWH(curDate,wh).start*60;
+      continue;
+    }
+    if(curMin<period.start)curMin=period.start; // Snap au début de la période (après la pause)
+    const avail=period.end-curMin;
     if(rem<=avail)return{endDate:curDate,endTime:minToTime(curMin+rem)};
-    rem-=avail;const nd=nextWorkingDay(curDate,wh);curDate=nd;curMin=getWH(nd,wh).start*60;
+    rem-=avail;
+    curMin=period.end; // Ira chercher la période suivante (ou lendemain)
   }
   return{endDate:curDate,endTime:minToTime(curMin)};
 }
@@ -71,7 +99,8 @@ function getSegment(job,dk,wh){
   const w=getWH(dk,wh),dayStartMin=(w.start||8)*60,dayEndMin=(w.end||18)*60;
   const segStart=job.startDate===dk?Math.max(timeToMin(job.startTime),dayStartMin):dayStartMin;
   const segEnd  =job.endDate===dk  ?Math.min(timeToMin(job.endTime),  dayEndMin)  :dayEndMin;
-  return{segStart,segEnd,before:job.startDate<dk,after:job.endDate>dk,duration:segEnd-segStart};
+  const duration=getWorkingDuration(segStart,segEnd,w);
+  return{segStart,segEnd,before:job.startDate<dk,after:job.endDate>dk,duration};
 }
 function countWorkDays(startDate,endDate,wh){let n=0,d=startDate;while(d<=endDate){if(isWorkingDay(d,wh))n++;d=offsetDate(d,1);}return n;}
 
@@ -81,7 +110,8 @@ function computeFillInfo(dk,allJobs,machines,wh){
   const active=machines.filter(m=>m.active!==false);
   if(!active.length)return null;
   const w=getWH(dk,wh); if(!w.active)return null;
-  const cap=(w.end-w.start)*60*active.length; if(!cap)return null;
+  const breakDur=(w.breakActive&&w.breakStart&&w.breakEnd)?Math.max(0,w.breakEnd-w.breakStart):0;
+  const cap=((w.end-w.start)*60-breakDur)*active.length; if(!cap)return null;
   const scheduled=allJobs.filter(j=>jobOverlapsDay(j,dk)).reduce((s,j)=>s+getSegment(j,dk,wh).duration,0);
   return{rate:Math.min(100,Math.round((scheduled/cap)*100)),scheduledMin:scheduled,capacityMin:cap};
 }
@@ -115,12 +145,15 @@ function findFirstAvailableSlot(machineId,proposedDate,proposedTime,durationMin,
     const taskEndOnDay=Math.min(dayEnd,curMin+durationMin);
     const busy=mJobs
       .filter(j=>jobOverlapsDay(j,curDate))
-      .map(j=>getSegment(j,curDate,wh))
-      .sort((a,b)=>a.segStart-b.segStart);
+      .map(j=>({segStart:getSegment(j,curDate,wh).segStart,segEnd:getSegment(j,curDate,wh).segEnd}));
+    // Ajouter la pause méridienne comme créneau occupé
+    const ww=getWH(curDate,wh);
+    if(ww.breakActive&&ww.breakStart&&ww.breakEnd)busy.push({segStart:ww.breakStart,segEnd:ww.breakEnd});
+    busy.sort((a,b)=>a.segStart-b.segStart);
     const conflict=busy.find(b=>curMin<b.segEnd&&taskEndOnDay>b.segStart);
     if(!conflict)return{startDate:curDate,startTime:minToTime(curMin)};
     curMin=conflict.segEnd;
-    if(curMin>=dayEnd){curDate=nextWorkingDay(curDate,wh);curMin=getWH(curDate,wh).start*60;}
+    if(curMin>=dayEnd){curDate=nextWorkingDay(curDate,wh);curMin=getDayPeriods(curDate,wh)[0]?.start||getWH(curDate,wh).start*60;}
   }
   return{startDate:curDate,startTime:minToTime(curMin)};
 }
@@ -572,6 +605,12 @@ function TimelineGrid({label,machines,dayJobs,dateKey,wh,workingHours,openAdd,op
                   onClick={e=>{if(isDragging||!can.add)return;const rect=e.currentTarget.getBoundingClientRect();const raw=dayStartMin+((e.clientX-rect.left)/tlW)*dayDur;openAdd(machine.id,minToTime(Math.max(dayStartMin,Math.min(dayEndMin-5,snapMin(raw)))),dateKey);}}>
                   {halfMarkers.map(m=><div key={m} style={{position:"absolute",left:toLeft(m),top:0,bottom:0,borderLeft:"1px dashed #F0EDE8",pointerEvents:"none"}}/>)}
                   {hourMarkers.filter(m=>m>dayStartMin).map(m=><div key={m} style={{position:"absolute",left:toLeft(m),top:0,bottom:0,borderLeft:"1px solid #E8E8E8",pointerEvents:"none"}}/>)}
+                  {/* Zone pause méridienne */}
+                  {wh.breakActive&&wh.breakStart&&wh.breakEnd&&wh.breakStart>dayStartMin&&wh.breakEnd<dayEndMin&&(
+                    <div style={{position:"absolute",left:toLeft(wh.breakStart),width:Math.max(toWidth(wh.breakEnd-wh.breakStart),1),top:0,bottom:0,background:"repeating-linear-gradient(45deg,rgba(0,0,0,0.035) 0,rgba(0,0,0,0.035) 3px,transparent 3px,transparent 7px)",borderLeft:"1.5px dashed #D1D5DB",borderRight:"1.5px dashed #D1D5DB",pointerEvents:"none",zIndex:3,display:"flex",alignItems:"center",justifyContent:"center"}}>
+                      <span style={{fontSize:9,color:"#9CA3AF",fontWeight:600,background:"rgba(255,255,255,0.85)",padding:"1px 3px",borderRadius:3,whiteSpace:"nowrap"}}>🍽 pause</span>
+                    </div>
+                  )}
                   {mJobs.map(job=>{
                     const seg=getSegment(job,dateKey,workingHours);
                     const left=toLeft(seg.segStart),width=Math.max(toWidth(seg.duration),12);
@@ -823,19 +862,7 @@ function AdminPanel({allUsers,workingHours,machines,onClose}){
         )}
 
         {/* ── Utilisateurs ── */}
-        {tab==="users"&&(
-          <>
-            <div style={{fontSize:11,color:"#718096",marginBottom:10,background:"#F7F4F0",borderRadius:8,padding:"8px 10px"}}><strong>Admin</strong> : tout + notifs · <strong>Opérateur</strong> : ajouter/modifier · <strong>Lecteur</strong> : consulter</div>
-            {Object.entries(allUsers).map(([uid,u])=>(
-              <div key={uid} style={{display:"flex",alignItems:"center",gap:10,padding:"8px 0",borderBottom:"1px solid #F7F4F0"}}>
-                <div style={{flex:1,minWidth:0}}><div style={{fontSize:12,fontWeight:600,color:"#2D3748",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{u.name||u.email}</div><div style={{fontSize:10,color:"#A0AEC0"}}>{u.email}</div></div>
-                <select value={u.role||"lecteur"} onChange={e=>update(ref(db,`users/${uid}`),{role:e.target.value})} style={{padding:"5px 8px",borderRadius:7,border:"1.5px solid #E2E8F0",fontSize:12,cursor:"pointer",fontWeight:600,background:u.role==="admin"?"#FEFCE8":u.role==="operateur"?"#F0FDF4":"#F9FAFB",color:u.role==="admin"?"#854D0E":u.role==="operateur"?"#166534":"#4B5563"}}>
-                  <option value="admin">Administrateur</option><option value="operateur">Opérateur</option><option value="lecteur">Lecteur</option>
-                </select>
-              </div>
-            ))}
-          </>
-        )}
+        {tab==="users"&&<UsersTab allUsers={allUsers}/>}
 
         {/* ── Horaires ── */}
         {tab==="horaires"&&(
@@ -852,22 +879,58 @@ function AdminPanel({allUsers,workingHours,machines,onClose}){
                     </div>
                     <span style={{fontSize:11,color:wh.active?"#22C55E":"#A0AEC0",fontWeight:600,minWidth:55}}>{wh.active?"Travaillé":"Repos"}</span>
                   </div>
-                  {wh.active&&<div style={{display:"flex",gap:10,alignItems:"center"}}>
-                    <div style={{flex:1}}><label style={{fontSize:10,fontWeight:600,color:"#718096",display:"block",marginBottom:3}}>Début</label>
-                      <select value={wh.start} onChange={e=>update(ref(db,`settings/workingHours/${di}`),{start:+e.target.value})} style={{width:"100%",padding:"5px 8px",borderRadius:7,border:"1.5px solid #E2E8F0",fontSize:11}}>
-                        {AH.filter(h=>h<wh.end).map(h=><option key={h} value={h}>{h}h00</option>)}
-                      </select>
+                  {wh.active&&(
+                    <>
+                    {/* Horaires journée */}
+                    <div style={{display:"flex",gap:10,alignItems:"center",marginBottom:8}}>
+                      <div style={{flex:1}}><label style={{fontSize:10,fontWeight:600,color:"#718096",display:"block",marginBottom:3}}>Début</label>
+                        <select value={wh.start} onChange={e=>update(ref(db,`settings/workingHours/${di}`),{start:+e.target.value})} style={{width:"100%",padding:"5px 8px",borderRadius:7,border:"1.5px solid #E2E8F0",fontSize:11}}>
+                          {AH.filter(h=>h<wh.end).map(h=><option key={h} value={h}>{h}h00</option>)}
+                        </select>
+                      </div>
+                      <div style={{color:"#A0AEC0",fontSize:14,marginTop:14}}>→</div>
+                      <div style={{flex:1}}><label style={{fontSize:10,fontWeight:600,color:"#718096",display:"block",marginBottom:3}}>Fin</label>
+                        <select value={wh.end} onChange={e=>update(ref(db,`settings/workingHours/${di}`),{end:+e.target.value})} style={{width:"100%",padding:"5px 8px",borderRadius:7,border:"1.5px solid #E2E8F0",fontSize:11}}>
+                          {AH.filter(h=>h>wh.start).map(h=><option key={h} value={h}>{h}h00</option>)}
+                        </select>
+                      </div>
+                      <div style={{flex:1}}><label style={{fontSize:10,fontWeight:600,color:"#718096",display:"block",marginBottom:3}}>Total</label>
+                        <div style={{padding:"5px 8px",borderRadius:7,background:"#F7F4F0",fontSize:11,color:"#4A5568",fontWeight:700,textAlign:"center"}}>
+                          {wh.end-wh.start-(wh.breakActive&&wh.breakStart&&wh.breakEnd?Math.round((wh.breakEnd-wh.breakStart)/60):0)}h
+                        </div>
+                      </div>
                     </div>
-                    <div style={{color:"#A0AEC0",fontSize:14,marginTop:14}}>→</div>
-                    <div style={{flex:1}}><label style={{fontSize:10,fontWeight:600,color:"#718096",display:"block",marginBottom:3}}>Fin</label>
-                      <select value={wh.end} onChange={e=>update(ref(db,`settings/workingHours/${di}`),{end:+e.target.value})} style={{width:"100%",padding:"5px 8px",borderRadius:7,border:"1.5px solid #E2E8F0",fontSize:11}}>
-                        {AH.filter(h=>h>wh.start).map(h=><option key={h} value={h}>{h}h00</option>)}
-                      </select>
+                    {/* Pause méridienne */}
+                    <div style={{background:"#FFF9F0",border:"1px solid #FED7AA",borderRadius:8,padding:"8px 10px"}}>
+                      <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:wh.breakActive?8:0}}>
+                        <span style={{fontSize:11,color:"#92400E"}}>🍽</span>
+                        <span style={{fontSize:11,fontWeight:600,color:"#92400E",flex:1}}>Pause méridienne</span>
+                        <div onClick={()=>update(ref(db,`settings/workingHours/${di}`),{breakActive:!wh.breakActive})} style={{width:32,height:17,borderRadius:99,background:wh.breakActive?"#F59E0B":"#CBD5E0",cursor:"pointer",position:"relative",flexShrink:0}}>
+                          <div style={{position:"absolute",top:2,left:wh.breakActive?17:2,width:13,height:13,borderRadius:"50%",background:"white",transition:"left .2s"}}/>
+                        </div>
+                        <span style={{fontSize:10,color:wh.breakActive?"#F59E0B":"#A0AEC0",fontWeight:600,minWidth:36}}>{wh.breakActive?"Active":"Off"}</span>
+                      </div>
+                      {wh.breakActive&&(
+                        <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                          <div style={{flex:1}}><label style={{fontSize:10,fontWeight:600,color:"#92400E",display:"block",marginBottom:3}}>Début pause</label>
+                            <select value={wh.breakStart||720} onChange={e=>update(ref(db,`settings/workingHours/${di}`),{breakStart:+e.target.value})} style={{width:"100%",padding:"5px 8px",borderRadius:7,border:"1.5px solid #FED7AA",fontSize:11}}>
+                              {Array.from({length:24},(_,i)=>wh.start*60+i*15+60).filter(m=>m<(wh.end||18)*60).map(m=><option key={m} value={m}>{fmtTime(minToTime(m))}</option>)}
+                            </select>
+                          </div>
+                          <div style={{color:"#FCD34D",fontSize:13,marginTop:14}}>→</div>
+                          <div style={{flex:1}}><label style={{fontSize:10,fontWeight:600,color:"#92400E",display:"block",marginBottom:3}}>Fin pause</label>
+                            <select value={wh.breakEnd||780} onChange={e=>update(ref(db,`settings/workingHours/${di}`),{breakEnd:+e.target.value})} style={{width:"100%",padding:"5px 8px",borderRadius:7,border:"1.5px solid #FED7AA",fontSize:11}}>
+                              {Array.from({length:24},(_,i)=>(wh.breakStart||720)+i*15+15).filter(m=>m<=(wh.end||18)*60).map(m=><option key={m} value={m}>{fmtTime(minToTime(m))}</option>)}
+                            </select>
+                          </div>
+                          <div style={{flex:1}}><label style={{fontSize:10,fontWeight:600,color:"#92400E",display:"block",marginBottom:3}}>Durée</label>
+                            <div style={{padding:"5px 8px",borderRadius:7,background:"#FEF3C7",fontSize:11,color:"#92400E",fontWeight:700,textAlign:"center"}}>{fmtDur((wh.breakEnd||780)-(wh.breakStart||720))}</div>
+                          </div>
+                        </div>
+                      )}
                     </div>
-                    <div style={{flex:1}}><label style={{fontSize:10,fontWeight:600,color:"#718096",display:"block",marginBottom:3}}>Total</label>
-                      <div style={{padding:"5px 8px",borderRadius:7,background:"#F7F4F0",fontSize:11,color:"#4A5568",fontWeight:700,textAlign:"center"}}>{wh.end-wh.start}h</div>
-                    </div>
-                  </div>}
+                    </>
+                  )}
                 </div>
               );
             })}
@@ -875,6 +938,131 @@ function AdminPanel({allUsers,workingHours,machines,onClose}){
         )}
       </div>
     </div>
+  );
+}
+
+// ─── Onglet Utilisateurs ──────────────────────────────────────────────────────
+function UsersTab({allUsers}){
+  const [showForm, setShowForm] = useState(false);
+  const [newUser,  setNewUser]  = useState({name:"",email:"",password:"",role:"operateur"});
+  const [creating, setCreating] = useState(false);
+  const [err,      setErr]      = useState("");
+  const [success,  setSuccess]  = useState("");
+
+  const createUser = async () => {
+    if(!newUser.email.trim()||!newUser.password||newUser.password.length<6){
+      setErr("Email requis et mot de passe minimum 6 caractères."); return;
+    }
+    setCreating(true); setErr(""); setSuccess("");
+    try {
+      // Création via l'API REST Firebase (ne déconnecte pas l'admin)
+      const apiKey = import.meta.env.VITE_FIREBASE_API_KEY;
+      const res = await fetch(
+        `https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=${apiKey}`,
+        { method:"POST", headers:{"Content-Type":"application/json"},
+          body: JSON.stringify({email:newUser.email.trim(), password:newUser.password, returnSecureToken:false}) }
+      );
+      const data = await res.json();
+      if(!res.ok) throw new Error(data.error?.message||"Erreur création");
+      // Créer le profil dans la base
+      await set(ref(db,`users/${data.localId}`),{
+        email: newUser.email.trim(),
+        name:  newUser.name.trim()||newUser.email.split("@")[0],
+        role:  newUser.role,
+      });
+      setSuccess(`✅ Utilisateur "${newUser.email}" créé avec le rôle ${ROLE_LABELS[newUser.role]}.`);
+      setNewUser({name:"",email:"",password:"",role:"operateur"});
+      setShowForm(false);
+    } catch(e){
+      const msg = e.message;
+      if(msg.includes("EMAIL_EXISTS"))setErr("Cet email est déjà utilisé.");
+      else if(msg.includes("INVALID_EMAIL"))setErr("Format d'email invalide.");
+      else if(msg.includes("WEAK_PASSWORD"))setErr("Mot de passe trop faible (min. 6 caractères).");
+      else setErr("Erreur : "+msg);
+    } finally { setCreating(false); }
+  };
+
+  const deleteUser = async (uid, u) => {
+    if(!window.confirm(`Supprimer "${u.name||u.email}" ?
+(Supprime le profil mais pas le compte Firebase Auth)`))return;
+    await remove(ref(db,`users/${uid}`));
+  };
+
+  return(
+    <>
+      {/* Résumé des rôles */}
+      <div style={{fontSize:11,color:"#718096",marginBottom:12,background:"#F7F4F0",borderRadius:8,padding:"8px 10px"}}>
+        <strong>Admin</strong> : tout + notifs · <strong>Opérateur</strong> : ajouter/modifier · <strong>Lecteur</strong> : consulter
+      </div>
+
+      {/* Feedback */}
+      {err&&<div style={{background:"#FEE2E2",color:"#991B1B",borderRadius:8,padding:"8px 10px",fontSize:11,marginBottom:10}}>{err}</div>}
+      {success&&<div style={{background:"#D1FAE5",color:"#065F46",borderRadius:8,padding:"8px 10px",fontSize:11,marginBottom:10}}>{success}</div>}
+
+      {/* Liste des utilisateurs */}
+      {Object.entries(allUsers).map(([uid,u])=>(
+        <div key={uid} style={{display:"flex",alignItems:"center",gap:8,padding:"8px 0",borderBottom:"1px solid #F7F4F0"}}>
+          <div style={{flex:1,minWidth:0}}>
+            <div style={{fontSize:12,fontWeight:600,color:"#2D3748",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{u.name||u.email}</div>
+            <div style={{fontSize:10,color:"#A0AEC0"}}>{u.email}</div>
+          </div>
+          <select value={u.role||"lecteur"} onChange={e=>update(ref(db,`users/${uid}`),{role:e.target.value})}
+            style={{padding:"5px 7px",borderRadius:7,border:"1.5px solid #E2E8F0",fontSize:11,cursor:"pointer",fontWeight:600,
+              background:u.role==="admin"?"#FEFCE8":u.role==="operateur"?"#F0FDF4":"#F9FAFB",
+              color:u.role==="admin"?"#854D0E":u.role==="operateur"?"#166534":"#4B5563"}}>
+            <option value="admin">Administrateur</option>
+            <option value="operateur">Opérateur</option>
+            <option value="lecteur">Lecteur</option>
+          </select>
+          <button onClick={()=>deleteUser(uid,u)} title="Supprimer le profil"
+            style={{background:"#FEE2E2",color:"#991B1B",border:"none",borderRadius:6,width:24,height:24,cursor:"pointer",fontSize:12,flexShrink:0}}>🗑</button>
+        </div>
+      ))}
+
+      {/* Formulaire de création */}
+      {showForm?(
+        <div style={{marginTop:14,background:"#F7F9FC",borderRadius:10,padding:14,border:"1.5px solid #E2E8F0"}}>
+          <div style={{fontSize:12,fontWeight:700,color:"#1A1A2E",marginBottom:12}}>➕ Nouvel utilisateur</div>
+          <div style={{marginBottom:9}}>
+            <label style={{fontSize:11,fontWeight:600,color:"#555",display:"block",marginBottom:3}}>Prénom / Nom</label>
+            <input value={newUser.name} onChange={e=>setNewUser(u=>({...u,name:e.target.value}))} placeholder="Ex: Marie Dupont"
+              style={{width:"100%",padding:"7px 9px",borderRadius:7,border:"1.5px solid #E2E8F0",fontSize:12,boxSizing:"border-box"}}/>
+          </div>
+          <div style={{marginBottom:9}}>
+            <label style={{fontSize:11,fontWeight:600,color:"#555",display:"block",marginBottom:3}}>Email *</label>
+            <input type="email" value={newUser.email} onChange={e=>setNewUser(u=>({...u,email:e.target.value}))} placeholder="prenom@atelier.fr"
+              style={{width:"100%",padding:"7px 9px",borderRadius:7,border:"1.5px solid #E2E8F0",fontSize:12,boxSizing:"border-box"}}/>
+          </div>
+          <div style={{marginBottom:9}}>
+            <label style={{fontSize:11,fontWeight:600,color:"#555",display:"block",marginBottom:3}}>Mot de passe temporaire *</label>
+            <input type="password" value={newUser.password} onChange={e=>setNewUser(u=>({...u,password:e.target.value}))} placeholder="Min. 6 caractères"
+              style={{width:"100%",padding:"7px 9px",borderRadius:7,border:"1.5px solid #E2E8F0",fontSize:12,boxSizing:"border-box"}}/>
+          </div>
+          <div style={{marginBottom:14}}>
+            <label style={{fontSize:11,fontWeight:600,color:"#555",display:"block",marginBottom:3}}>Rôle</label>
+            <select value={newUser.role} onChange={e=>setNewUser(u=>({...u,role:e.target.value}))}
+              style={{width:"100%",padding:"7px 9px",borderRadius:7,border:"1.5px solid #E2E8F0",fontSize:12}}>
+              <option value="admin">Administrateur</option>
+              <option value="operateur">Opérateur</option>
+              <option value="lecteur">Lecteur</option>
+            </select>
+          </div>
+          <div style={{display:"flex",gap:8}}>
+            <button onClick={()=>{setShowForm(false);setErr("");setNewUser({name:"",email:"",password:"",role:"operateur"});}}
+              style={{flex:1,padding:"8px",borderRadius:7,border:"1.5px solid #E2E8F0",background:"white",fontWeight:600,cursor:"pointer",fontSize:12}}>Annuler</button>
+            <button onClick={createUser} disabled={creating||!newUser.email||!newUser.password}
+              style={{flex:2,padding:"8px",borderRadius:7,border:"none",background:(creating||!newUser.email||!newUser.password)?"#CBD5E0":"#1A1A2E",color:"white",fontWeight:700,cursor:(creating||!newUser.email||!newUser.password)?"default":"pointer",fontSize:12}}>
+              {creating?"⏳ Création…":"Créer l'utilisateur"}
+            </button>
+          </div>
+        </div>
+      ):(
+        <button onClick={()=>{setShowForm(true);setErr("");setSuccess("");}}
+          style={{width:"100%",marginTop:12,padding:"9px",borderRadius:8,border:"1.5px dashed #CBD5E0",background:"white",color:"#4A5568",fontWeight:600,cursor:"pointer",fontSize:12}}>
+          ➕ Créer un nouvel utilisateur
+        </button>
+      )}
+    </>
   );
 }
 
