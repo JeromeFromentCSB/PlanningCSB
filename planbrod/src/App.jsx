@@ -25,7 +25,7 @@ const STATUS_LABELS = {"En attente":"En attente","En cours":"En cours","Termine"
 const JOB_COLORS    = ["#E07A5F","#3D405B","#81B29A","#F2CC8F","#6B9AC4","#D4A5A5","#9BB7D4","#C3B1E1","#A8D5BA","#F4A261"];
 const ROLE_LABELS   = {admin:"Administrateur",operateur:"Opérateur",lecteur:"Lecteur"};
 const CAN = { admin:{add:true,edit:true,delete:true,manage:true,status:true}, operateur:{add:true,edit:true,delete:false,manage:false,status:true}, lecteur:{add:false,edit:false,delete:false,manage:false,status:true} };
-const SNAP_MIN=5, MIN_TIMELINE=300, LABEL_W=90, ROW_H=68;
+const SNAP_MIN=5, MIN_TIMELINE=320, LABEL_W=110, ROW_H=82;
 
 // ─── Helpers temps ─────────────────────────────────────────────────────────────
 const timeToMin = (t)=>{if(!t)return 0;const[h,m]=t.split(":").map(Number);return h*60+(m||0);};
@@ -656,95 +656,104 @@ function PlanningView({monoM,multiM,dayJobs,dateKey,wh,dayActive,workingHours,ma
 
 // ─── Timeline pixel ────────────────────────────────────────────────────────────
 function TimelineGrid({label,machines,dayJobs,dateKey,wh,workingHours,openAdd,openEdit,headerColor,draggingJob,dragOverCell,setDragOverCell,onDragStart,onDragEnd,onDrop,can,onContextMenu}){
-  const wrapRef=useRef(null);
-  const [wrapW,setWrapW]=useState(0);
-  useEffect(()=>{
-    if(!wrapRef.current)return;
-    const ro=new ResizeObserver(([e])=>setWrapW(e.contentRect.width));
-    ro.observe(wrapRef.current);return()=>ro.disconnect();
-  },[]);
+  // Positionnement en pourcentages : la timeline s'adapte automatiquement à l'écran
   const dayStartMin=(wh.start||8)*60,dayEndMin=(wh.end||18)*60,dayDur=dayEndMin-dayStartMin;
-  const tlW=wrapW>0?Math.max(wrapW-LABEL_W,MIN_TIMELINE):MIN_TIMELINE;
-  const toLeft=(m)=>((m-dayStartMin)/dayDur)*tlW;
-  const toWidth=(d)=>(d/dayDur)*tlW;
+  const pct =(m)=>((m-dayStartMin)/dayDur*100).toFixed(5)+"%";
+  const wpct=(d)=>(d/dayDur*100).toFixed(5)+"%";
+  const timeFromX=(clientX,rect)=>snapMin(Math.max(dayStartMin,Math.min(dayEndMin-5,dayStartMin+(clientX-rect.left)/rect.width*dayDur)));
   const isDragging=draggingJob!=null;
   const hourMarkers=[],halfMarkers=[];
   for(let m=dayStartMin;m<=dayEndMin;m+=60)hourMarkers.push(m);
   for(let m=dayStartMin+30;m<dayEndMin;m+=60)halfMarkers.push(m);
-
   return(
     <div>
       <div style={{padding:"10px 14px",background:headerColor,color:"white",fontWeight:700,fontSize:12}}>{label}</div>
-      <div ref={wrapRef} style={{overflowX:tlW<=wrapW-LABEL_W||wrapW===0?"hidden":"auto"}}>
-        <div style={{display:"flex",width:LABEL_W+tlW}}>
-          <div style={{width:LABEL_W,flexShrink:0,borderRight:"1px solid #F0EDE8"}}>
-            <div style={{height:28,background:"#FAFAF8",borderBottom:"1px solid #F0EDE8"}}/>
-            {machines.map((m,mi)=>(
-              <div key={m.id} style={{height:ROW_H,display:"flex",alignItems:"center",padding:"0 8px",background:mi%2===0?"white":"#FDFCFB",borderBottom:"1px solid #F7F4F0"}}>
-                <div style={{display:"flex",alignItems:"center",gap:5}}>
-                  <div style={{width:7,height:7,borderRadius:"50%",background:m.color,flexShrink:0}}/>
-                  <div>
-                    <div style={{fontSize:11,fontWeight:600,color:"#2D3748",whiteSpace:"nowrap"}}>{m.label}</div>
-                    <div style={{fontSize:9,color:"#A0AEC0"}}>{m.heads} tête{m.heads>1?"s":""}</div>
-                  </div>
+      <div style={{display:"flex",overflowX:"auto"}}>
+        {/* Colonne labels — largeur fixe */}
+        <div style={{width:LABEL_W,flexShrink:0,borderRight:"1px solid #F0EDE8"}}>
+          <div style={{height:32,background:"#FAFAF8",borderBottom:"1px solid #F0EDE8"}}/>
+          {machines.map((m,mi)=>(
+            <div key={m.id} style={{height:ROW_H,display:"flex",alignItems:"center",padding:"0 8px",background:mi%2===0?"white":"#FDFCFB",borderBottom:"1px solid #F7F4F0"}}>
+              <div style={{display:"flex",alignItems:"center",gap:5}}>
+                <div style={{width:7,height:7,borderRadius:"50%",background:m.color,flexShrink:0}}/>
+                <div>
+                  <div style={{fontSize:13,fontWeight:600,color:"#2D3748",whiteSpace:"nowrap"}}>{m.label}</div>
+                  <div style={{fontSize:11,color:"#A0AEC0"}}>{m.heads} tête{m.heads>1?"s":""}</div>
                 </div>
+              </div>
+            </div>
+          ))}
+        </div>
+        {/* Colonne timeline — flex:1 remplit tout l'espace disponible */}
+        <div style={{flex:1,minWidth:MIN_TIMELINE,position:"relative"}}>
+          {/* En-tête heures */}
+          <div style={{height:32,background:"#FAFAF8",borderBottom:"1px solid #F0EDE8",position:"relative"}}>
+            {hourMarkers.map(m=>(
+              <div key={m} style={{position:"absolute",left:pct(m),top:0,bottom:0,borderLeft:m===dayStartMin?"none":"1px solid #E2E8F0",display:"flex",alignItems:"center",paddingLeft:4}}>
+                <span style={{fontSize:12,fontWeight:600,color:"#718096",whiteSpace:"nowrap"}}>{fmtTime(minToTime(m))}</span>
               </div>
             ))}
           </div>
-          <div style={{position:"relative",width:tlW,flexShrink:0}}>
-            <div style={{height:28,background:"#FAFAF8",borderBottom:"1px solid #F0EDE8",position:"relative"}}>
-              {hourMarkers.map(m=><div key={m} style={{position:"absolute",left:toLeft(m),top:0,bottom:0,borderLeft:m===dayStartMin?"none":"1px solid #E2E8F0",display:"flex",alignItems:"center",paddingLeft:4}}><span style={{fontSize:10,fontWeight:600,color:"#718096",whiteSpace:"nowrap"}}>{fmtTime(minToTime(m))}</span></div>)}
-            </div>
-            {machines.map((machine,mi)=>{
-              const mJobs=dayJobs.filter(j=>j.machineId===machine.id);
-              const isOver=dragOverCell?.machineId===machine.id&&dragOverCell?.dk===dateKey;
-              return(
-                <div key={machine.id}
-                  style={{height:ROW_H,position:"relative",background:isOver?(mi%2===0?"#EBF4FF":"#E6F0FF"):(mi%2===0?"white":"#FDFCFB"),borderBottom:"1px solid #F7F4F0",transition:"background .1s"}}
-                  onDragOver={e=>{e.preventDefault();if(can.edit)setDragOverCell({machineId:machine.id,dk:dateKey});}}
-                  onDragLeave={()=>setDragOverCell(null)}
-                  onDrop={e=>{e.preventDefault();if(!draggingJob||!can.edit)return;const rect=e.currentTarget.getBoundingClientRect();const raw=dayStartMin+((e.clientX-rect.left)/tlW)*dayDur;onDrop(machine.id,minToTime(Math.max(dayStartMin,Math.min(dayEndMin-5,snapMin(raw)))),dateKey);}}
-                  onClick={e=>{if(isDragging||!can.add)return;const rect=e.currentTarget.getBoundingClientRect();const raw=dayStartMin+((e.clientX-rect.left)/tlW)*dayDur;openAdd(machine.id,minToTime(Math.max(dayStartMin,Math.min(dayEndMin-5,snapMin(raw)))),dateKey);}}>
-                  {halfMarkers.map(m=><div key={m} style={{position:"absolute",left:toLeft(m),top:0,bottom:0,borderLeft:"1px dashed #F0EDE8",pointerEvents:"none"}}/>)}
-                  {hourMarkers.filter(m=>m>dayStartMin).map(m=><div key={m} style={{position:"absolute",left:toLeft(m),top:0,bottom:0,borderLeft:"1px solid #E8E8E8",pointerEvents:"none"}}/>)}
-                  {/* Zone pause méridienne */}
-                  {wh.breakActive&&wh.breakStart&&wh.breakEnd&&wh.breakStart>dayStartMin&&wh.breakEnd<dayEndMin&&(
-                    <div style={{position:"absolute",left:toLeft(wh.breakStart),width:Math.max(toWidth(wh.breakEnd-wh.breakStart),1),top:0,bottom:0,background:"repeating-linear-gradient(45deg,rgba(0,0,0,0.035) 0,rgba(0,0,0,0.035) 3px,transparent 3px,transparent 7px)",borderLeft:"1.5px dashed #D1D5DB",borderRight:"1.5px dashed #D1D5DB",pointerEvents:"none",zIndex:3,display:"flex",alignItems:"center",justifyContent:"center"}}>
-                      <span style={{fontSize:9,color:"#9CA3AF",fontWeight:600,background:"rgba(255,255,255,0.85)",padding:"1px 3px",borderRadius:3,whiteSpace:"nowrap"}}>🍽 pause</span>
+          {/* Rangées machines */}
+          {machines.map((machine,mi)=>{
+            const mJobs=dayJobs.filter(j=>j.machineId===machine.id);
+            const isOver=dragOverCell?.machineId===machine.id&&dragOverCell?.dk===dateKey;
+            return(
+              <div key={machine.id}
+                style={{height:ROW_H,position:"relative",background:isOver?(mi%2===0?"#EBF4FF":"#E6F0FF"):(mi%2===0?"white":"#FDFCFB"),borderBottom:"1px solid #F7F4F0",transition:"background .1s"}}
+                onDragOver={e=>{e.preventDefault();if(can.edit)setDragOverCell({machineId:machine.id,dk:dateKey});}}
+                onDragLeave={()=>setDragOverCell(null)}
+                onDrop={e=>{e.preventDefault();if(!draggingJob||!can.edit)return;onDrop(machine.id,minToTime(timeFromX(e.clientX,e.currentTarget.getBoundingClientRect())),dateKey);}}
+                onClick={e=>{if(isDragging||!can.add)return;openAdd(machine.id,minToTime(timeFromX(e.clientX,e.currentTarget.getBoundingClientRect())),dateKey);}}>
+                {halfMarkers.map(m=><div key={m} style={{position:"absolute",left:pct(m),top:0,bottom:0,borderLeft:"1px dashed #F0EDE8",pointerEvents:"none"}}/>)}
+                {hourMarkers.filter(m=>m>dayStartMin).map(m=><div key={m} style={{position:"absolute",left:pct(m),top:0,bottom:0,borderLeft:"1px solid #E8E8E8",pointerEvents:"none"}}/>)}
+                {/* Zone pause */}
+                {wh.breakActive&&wh.breakStart&&wh.breakEnd&&wh.breakStart>dayStartMin&&wh.breakEnd<dayEndMin&&(
+                  <div style={{position:"absolute",left:pct(wh.breakStart),width:wpct(wh.breakEnd-wh.breakStart),top:0,bottom:0,background:"repeating-linear-gradient(45deg,rgba(0,0,0,0.035) 0,rgba(0,0,0,0.035) 3px,transparent 3px,transparent 7px)",borderLeft:"1.5px dashed #D1D5DB",borderRight:"1.5px dashed #D1D5DB",pointerEvents:"none",zIndex:3,display:"flex",alignItems:"center",justifyContent:"center"}}>
+                    <span style={{fontSize:11,color:"#9CA3AF",fontWeight:600,background:"rgba(255,255,255,0.85)",padding:"2px 5px",borderRadius:3,whiteSpace:"nowrap"}}>🍽 pause</span>
+                  </div>
+                )}
+                {/* Tâches */}
+                {mJobs.map(job=>{
+                  const seg=getSegment(job,dateKey,workingHours);
+                  const sc=STATUS_COLORS[job.status],isGhost=draggingJob?.key===job.key;
+                  const showTime=seg.duration/dayDur>0.05;
+                  return(
+                    <div key={job.key} draggable={can.edit}
+                      onDragStart={e=>{e.stopPropagation();onDragStart(job);}} onDragEnd={onDragEnd}
+                      onClick={e=>{e.stopPropagation();if(!isDragging)openEdit(job);}}
+                      onContextMenu={e=>onContextMenu(e,job)}
+                      title={`${job.client}${job.description?" – "+job.description:""}
+${fmtDateFR(job.startDate)} ${fmtTime(job.startTime)} → ${fmtDateFR(job.endDate)} ${fmtTime(job.endTime)}
+${job.qty?`${job.qty}x ${job.unitTimeMin}min ÷ ${job.headsUsed}t = ${fmtDur(job.durationMin)}`:""}
+Clic droit = statut`}
+                      style={{position:"absolute",left:pct(seg.segStart),width:"calc("+wpct(seg.duration)+" - 2px)",minWidth:10,
+                        top:5,bottom:5,background:sc.bg,border:`1.5px solid ${sc.border}`,
+                        borderLeft:seg.before?"3px dashed "+job.couleur:`3px solid ${job.couleur}`,
+                        borderRight:seg.after?"2px dashed "+sc.border:`1.5px solid ${sc.border}`,
+                        borderRadius:`${seg.before?0:6}px ${seg.after?0:6}px ${seg.after?0:6}px ${seg.before?0:6}px`,
+                        padding:"3px 5px",overflow:"hidden",cursor:can.edit?(isDragging?"grabbing":"grab"):"pointer",
+                        opacity:isGhost?0.25:1,userSelect:"none",zIndex:1,transition:"opacity .15s,box-shadow .1s"}}
+                      onMouseEnter={e=>{if(!isDragging&&can.edit)e.currentTarget.style.boxShadow="0 3px 10px rgba(0,0,0,0.18)";e.currentTarget.style.zIndex=10;}}
+                      onMouseLeave={e=>{e.currentTarget.style.boxShadow="none";e.currentTarget.style.zIndex=1;}}>
+                      {seg.before&&<span style={{fontSize:11,color:job.couleur,fontWeight:900,marginRight:2}}>◀</span>}
+                      <span style={{fontSize:13,fontWeight:700,color:sc.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                        {job.client}{job.qty>0&&<span style={{fontSize:11,opacity:0.7,marginLeft:3}}>{job.qty}×</span>}
+                      </span>
+                      {seg.after&&<span style={{fontSize:11,color:job.couleur,fontWeight:900,position:"absolute",right:3,top:"50%",transform:"translateY(-50%)"}}>▶</span>}
+                      {showTime&&<div style={{fontSize:12,color:sc.text,opacity:0.65}}>{fmtTime(minToTime(seg.segStart))}→{fmtTime(minToTime(seg.segEnd))}</div>}
                     </div>
-                  )}
-                  {mJobs.map(job=>{
-                    const seg=getSegment(job,dateKey,workingHours);
-                    const left=toLeft(seg.segStart),width=Math.max(toWidth(seg.duration),12);
-                    const sc=STATUS_COLORS[job.status],isGhost=draggingJob?.key===job.key;
-                    return(
-                      <div key={job.key} draggable={can.edit} onDragStart={e=>{e.stopPropagation();onDragStart(job);}} onDragEnd={onDragEnd}
-                        onClick={e=>{e.stopPropagation();if(!isDragging)openEdit(job);}}
-                        onContextMenu={e=>onContextMenu(e,job)}
-                        title={`${job.client}${job.description?" – "+job.description:""}\n${fmtDateFR(job.startDate)} ${fmtTime(job.startTime)} → ${fmtDateFR(job.endDate)} ${fmtTime(job.endTime)}\n${job.qty?`${job.qty} pièces × ${job.unitTimeMin}min ÷ ${job.headsUsed} têtes = ${fmtDur(job.durationMin)}`:""}`}
-                        style={{position:"absolute",left,width:width-2,top:5,bottom:5,background:sc.bg,border:`1.5px solid ${sc.border}`,borderLeft:seg.before?"3px dashed "+job.couleur:`3px solid ${job.couleur}`,borderRight:seg.after?"2px dashed "+sc.border:`1.5px solid ${sc.border}`,borderRadius:`${seg.before?0:6}px ${seg.after?0:6}px ${seg.after?0:6}px ${seg.before?0:6}px`,padding:"3px 5px",overflow:"hidden",cursor:can.edit?(isDragging?"grabbing":"grab"):"pointer",opacity:isGhost?0.25:1,userSelect:"none",zIndex:1,transition:"opacity .15s,box-shadow .1s"}}
-                        onMouseEnter={e=>{if(!isDragging&&can.edit)e.currentTarget.style.boxShadow="0 3px 10px rgba(0,0,0,0.18)";e.currentTarget.style.zIndex=10;}}
-                        onMouseLeave={e=>{e.currentTarget.style.boxShadow="none";e.currentTarget.style.zIndex=1;}}>
-                        {seg.before&&<span style={{fontSize:9,color:job.couleur,fontWeight:900,marginRight:2}}>◀</span>}
-                        <span style={{fontSize:11,fontWeight:700,color:sc.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
-                          {job.client}{job.qty>0&&<span style={{fontSize:9,opacity:0.7,marginLeft:3}}>{job.qty}×</span>}
-                        </span>
-                        {seg.after&&<span style={{fontSize:9,color:job.couleur,fontWeight:900,position:"absolute",right:3,top:"50%",transform:"translateY(-50%)"}}>▶</span>}
-                        {width>80&&<div style={{fontSize:10,color:sc.text,opacity:0.55}}>{fmtTime(minToTime(seg.segStart))}→{fmtTime(minToTime(seg.segEnd))}</div>}
-                      </div>
-                    );
-                  })}
-                  {isOver&&<div style={{position:"absolute",inset:0,border:"2px dashed #6B9AC4",borderRadius:4,pointerEvents:"none",display:"flex",alignItems:"center",justifyContent:"center"}}><span style={{fontSize:11,fontWeight:700,color:"#6B9AC4"}}>Déposer ici</span></div>}
-                </div>
-              );
-            })}
-          </div>
+                  );
+                })}
+                {isOver&&<div style={{position:"absolute",inset:0,border:"2px dashed #6B9AC4",borderRadius:4,pointerEvents:"none",display:"flex",alignItems:"center",justifyContent:"center"}}><span style={{fontSize:11,fontWeight:700,color:"#6B9AC4"}}>Déposer ici</span></div>}
+              </div>
+            );
+          })}
         </div>
       </div>
     </div>
   );
 }
-
 // ─── Vue Semaine ───────────────────────────────────────────────────────────────
 function WeekView({monoM,multiM,allJobs,mondayKey,workingHours,machines,openAdd,openEdit,onDayClick,...dragProps}){
   const weekKeys=getWeekKeys(mondayKey);
@@ -805,7 +814,7 @@ function WeekGrid({label,machines,allJobs,weekKeys,workingHours,openAdd,openEdit
                               onMouseEnter={e=>{if(can.edit)e.currentTarget.style.boxShadow="0 2px 8px rgba(0,0,0,0.12)";}}
                               onMouseLeave={e=>{e.currentTarget.style.boxShadow="none";}}>
                               <div style={{fontSize:11,fontWeight:700,color:sc.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
-                                {seg.before&&<span style={{fontSize:9,color:job.couleur,fontWeight:900,marginRight:2}}>◀</span>}
+                                {seg.before&&<span style={{fontSize:11,color:job.couleur,fontWeight:900,marginRight:2}}>◀</span>}
                                 {job.client}{job.qty>0&&<span style={{fontSize:9,opacity:0.7,marginLeft:2}}>{job.qty}×</span>}
                                 {seg.after&&<span style={{fontSize:9,color:job.couleur,fontWeight:900,marginLeft:2}}>▶</span>}
                               </div>
