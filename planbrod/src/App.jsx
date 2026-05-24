@@ -175,8 +175,13 @@ export default function App(){
   const [showAdmin,    setShowAdmin]    = useState(false);
   const [draggingJob,  setDraggingJob]  = useState(null);
   const [dragOverCell, setDragOverCell] = useState(null);
-  const [contextMenu,  setContextMenu]  = useState(null); // { job, x, y }
-  const [loginErr,     setLoginErr]     = useState("");
+  const [contextMenu,    setContextMenu]    = useState(null);
+  const [pendingOrders,  setPendingOrders]  = useState({});
+  const [showPending,    setShowPending]    = useState(false);
+  const [pendingToAssign,setPendingToAssign]= useState(null); // ordre en cours d'affectation
+  const [axonautLoading, setAxonautLoading] = useState(false);
+  const [axonautMsg,     setAxonautMsg]     = useState("");
+  const [loginErr,       setLoginErr]       = useState("");
 
   // ── Auth ──────────────────────────────────────────────────────────
   useEffect(()=>onAuthStateChanged(auth,(u)=>{
@@ -217,6 +222,9 @@ export default function App(){
   useEffect(()=>{if(!authUser||userProfile?.role!=="admin")return;return onValue(ref(db,"notifications"),(snap)=>setNotifs(snap.val()||{}));},[authUser,userProfile?.role]);
   useEffect(()=>{if(!authUser||userProfile?.role!=="admin")return;return onValue(ref(db,"users"),(snap)=>setAllUsers(snap.val()||{}));},[authUser,userProfile?.role]);
 
+  // ── Commandes en attente Axonaut ────────────────────────────────
+  useEffect(()=>{ if(!authUser||userProfile?.role!=="admin")return; return onValue(ref(db,"pendingOrders"),(snap)=>setPendingOrders(snap.val()||{})); },[authUser,userProfile?.role]);
+
   const logChange=useCallback(async(action,details)=>{
     if(!authUser||!userProfile)return;
     await push(ref(db,"notifications"),{ts:Date.now(),action,details,user:userProfile.name||userProfile.email,role:userProfile.role,read:false});
@@ -226,6 +234,7 @@ export default function App(){
   const role    = userProfile?.role||"lecteur";
   const can     = CAN[role]||CAN.lecteur;
   const jobsList= Object.entries(allJobs).map(([key,val])=>({...val,key}));
+  const pendingOrdersList=Object.entries(pendingOrders||{}).map(([key,val])=>({...val,key})).sort((a,b)=>b.importedAt-a.importedAt);
   const dayJobs = jobsList.filter(j=>jobOverlapsDay(j,dateKey));
   const notifsList=Object.entries(notifs).map(([key,val])=>({...val,key})).sort((a,b)=>b.ts-a.ts);
   const unread  = notifsList.filter(n=>!n.read).length;
@@ -304,6 +313,11 @@ export default function App(){
     if(shifted)detail+=` · décalé automatiquement (chevauchement évité)`;
     if(modal.type==="add"){await push(ref(db,"jobs"),finalData);await logChange("ajout",`Ajout ${detail}`);}
     else{await update(ref(db,`jobs/${key}`),finalData);await logChange("modification",`Modif ${detail}`);}
+    // Si la tâche vient d'une commande Axonaut, supprimer de la liste en attente
+    if(pendingToAssign){
+      await remove(ref(db,`pendingOrders/${pendingToAssign.axonautId}`));
+      setPendingToAssign(null);
+    }
     setModal(null);
   };
   const deleteJob=async(key,job)=>{
@@ -352,6 +366,65 @@ export default function App(){
     await logChange("modification",`Statut "${job.client}" → ${STATUS_LABELS[newStatus]} (${MACHINES.find(m=>m.id===job.machineId)?.label||job.machineId})`);
     setContextMenu(null);
   };
+  // ── Import Axonaut ───────────────────────────────────────────────
+  const importFromAxonaut=async()=>{
+    setAxonautLoading(true); setAxonautMsg("");
+    try{
+      const res=await fetch("/api/axonaut?endpoint=opportunities&limit=100");
+      if(!res.ok)throw new Error("HTTP "+res.status);
+      const raw=await res.json();
+      // L'API peut retourner un tableau direct ou { data:[...] }
+      const orders=Array.isArray(raw)?raw:(raw.data||raw.results||raw.opportunities||[]);
+      const existingPending=Object.keys(pendingOrders||{});
+      const existingJobs=jobsList.map(j=>String(j.axonautId)).filter(Boolean);
+      let added=0;
+      for(const opp of orders){
+        const id=String(opp.id||opp.uid||"");
+        if(!id||existingPending.includes(id)||existingJobs.includes(id))continue;
+        // Statuts "Gagné" / "Won" = commande confirmée
+        const st=(opp.status||opp.state||opp.status_label||"").toLowerCase();
+        const isWon=!st||st.includes("won")||st.includes("gagn")||st.includes("accept")||st.includes("confirm");
+        if(!isWon)continue;
+        await set(ref(db,`pendingOrders/${id}`),{
+          axonautId:id,
+          client:opp.company?.name||opp.customer?.name||opp.contact?.name||"Client",
+          description:opp.name||opp.title||opp.subject||"",
+          amount:opp.amount||opp.total_amount||opp.price||0,
+          reference:opp.reference||opp.number||id,
+          createdAt:opp.created_at||opp.date||"",
+          importedAt:Date.now(),
+          rawStatus:opp.status||opp.state||"",
+        });
+        added++;
+      }
+      setAxonautMsg(added>0?`✅ ${added} commande${added>1?"s":""} importée${added>1?"s":""} avec succès.`:`ℹ️ Aucune nouvelle commande. (${orders.length} vérifiées)`);
+    }catch(e){
+      setAxonautMsg("❌ Erreur : "+e.message+". Vérifiez la variable AXONAUT_API_KEY dans Vercel.");
+    }finally{setAxonautLoading(false);}
+  };
+
+  const assignOrder=(order)=>{
+    // Pré-remplit le formulaire avec les données Axonaut
+    const wh=getWH(dateKey,workingHours);
+    const st=minToTime(wh.start*60);
+    const{endDate,endTime}=computeEnd(dateKey,st,60,workingHours);
+    const firstMachine=machines[0];
+    setForm({machineId:firstMachine?.id,startDate:dateKey,startTime:st,endDate,endTime,
+      durationMin:60,durationDays:0,durationH:1,durationM:0,
+      client:order.client,description:order.description,
+      status:"En attente",couleur:randColor(),
+      qty:0,unitTimeMin:0,headsUsed:firstMachine?.heads||1,
+      axonautId:order.axonautId,axonautRef:order.reference,
+    });
+    setPendingToAssign(order);
+    setModal({type:"add"});
+  };
+
+  const discardOrder=async(order)=>{
+    if(!window.confirm(`Ignorer la commande "${order.client}" ?`))return;
+    await remove(ref(db,`pendingOrders/${order.axonautId}`));
+  };
+
   const markAllRead   =async()=>{const u={};Object.keys(notifs).forEach(k=>{u[`notifications/${k}/read`]=true;});await update(ref(db),u);};
   const deleteAllNotifs=async()=>{ if(!window.confirm("Supprimer toutes les notifications ?"))return; await remove(ref(db,"notifications")); };
   const deleteNotif=async(k)=>remove(ref(db,`notifications/${k}`));
@@ -390,11 +463,18 @@ export default function App(){
           ))}
           <div style={{width:1,height:22,background:"rgba(255,255,255,0.2)",margin:"0 2px"}}/>
           {role==="admin"&&<button onClick={()=>{setShowNotifs(v=>!v);setShowAdmin(false);}} style={{...iconBtn,position:"relative"}}>🔔{unread>0&&<span style={{position:"absolute",top:-4,right:-4,background:"#E07A5F",color:"white",borderRadius:99,fontSize:9,fontWeight:800,minWidth:16,height:16,display:"flex",alignItems:"center",justifyContent:"center"}}>{unread}</span>}</button>}
-          {role==="admin"&&<button onClick={()=>{setShowAdmin(v=>!v);setShowNotifs(false);}} style={iconBtn}>⚙️</button>}
+          {role==="admin"&&<button onClick={()=>{setShowAdmin(v=>!v);setShowNotifs(false);setShowPending(false);}} style={iconBtn}>⚙️</button>}
+          {role==="admin"&&(
+            <button onClick={()=>{setShowPending(v=>!v);setShowNotifs(false);setShowAdmin(false);}} style={{...iconBtn,position:"relative",background:showPending?"#E07A5F":"rgba(255,255,255,0.15)"}} title="Commandes Axonaut en attente">
+              📥
+              {pendingOrdersList.length>0&&<span style={{position:"absolute",top:-4,right:-4,background:"#F59E0B",color:"white",borderRadius:99,fontSize:9,fontWeight:800,minWidth:16,height:16,display:"flex",alignItems:"center",justifyContent:"center"}}>{pendingOrdersList.length}</span>}
+            </button>
+          )}
           <button onClick={()=>signOut(auth)} style={{...iconBtn,opacity:0.7}}>🚪</button>
         </div>
       </div>
 
+      {showPending&&role==="admin"&&<PendingOrdersPanel orders={pendingOrdersList} onImport={importFromAxonaut} onAssign={assignOrder} onDiscard={discardOrder} loading={axonautLoading} msg={axonautMsg} onClose={()=>setShowPending(false)}/>}
       {showNotifs&&role==="admin"&&<NotifPanel notifs={notifsList} onMarkRead={markAllRead} onDelete={deleteNotif} onDeleteAll={deleteAllNotifs} onClose={()=>setShowNotifs(false)}/>}
       {showAdmin &&role==="admin"&&<AdminPanel allUsers={allUsers} workingHours={workingHours} machines={machines} onClose={()=>setShowAdmin(false)}/>}
 
@@ -1049,6 +1129,97 @@ function AdminPanel({allUsers,workingHours,machines,onClose}){
             })}
           </>
         )}
+      </div>
+    </div>
+  );
+}
+
+// ─── Panneau Commandes Axonaut en attente ─────────────────────────────────────
+function PendingOrdersPanel({orders,onImport,onAssign,onDiscard,loading,msg,onClose}){
+  const fmtAmount=(a)=>a>0?new Intl.NumberFormat("fr-FR",{style:"currency",currency:"EUR",maximumFractionDigits:0}).format(a):"";
+  const fmtImportDate=(ts)=>ts?new Date(ts).toLocaleDateString("fr-FR",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"}):"";
+
+  return(
+    <div style={{position:"fixed",top:62,right:12,width:420,background:"white",borderRadius:14,boxShadow:"0 8px 40px rgba(0,0,0,0.18)",zIndex:900,display:"flex",flexDirection:"column",maxHeight:"85vh",overflow:"hidden"}}>
+
+      {/* Header */}
+      <div style={{padding:"12px 16px",background:"#F59E0B",color:"white",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+        <div>
+          <div style={{fontWeight:700,fontSize:13}}>📥 Commandes Axonaut</div>
+          <div style={{fontSize:10,opacity:0.85}}>{orders.length} commande{orders.length!==1?"s":""} en attente d'affectation</div>
+        </div>
+        <div style={{display:"flex",gap:6,alignItems:"center"}}>
+          <button onClick={onImport} disabled={loading}
+            style={{background:"rgba(255,255,255,0.2)",color:"white",border:"none",borderRadius:6,padding:"5px 10px",cursor:loading?"default":"pointer",fontSize:11,fontWeight:600}}>
+            {loading?"⏳ Import…":"🔄 Synchroniser"}
+          </button>
+          <button onClick={onClose} style={{background:"rgba(255,255,255,0.2)",color:"white",border:"none",borderRadius:6,width:24,height:24,cursor:"pointer",fontSize:13}}>×</button>
+        </div>
+      </div>
+
+      {/* Message feedback */}
+      {msg&&(
+        <div style={{padding:"8px 14px",fontSize:11,fontWeight:600,
+          background:msg.startsWith("✅")?"#D1FAE5":msg.startsWith("ℹ️")?"#EFF6FF":"#FEE2E2",
+          color:msg.startsWith("✅")?"#065F46":msg.startsWith("ℹ️")?"#1D4ED8":"#991B1B",
+          borderBottom:"1px solid #F0EDE8"}}>
+          {msg}
+        </div>
+      )}
+
+      {/* Instructions si vide */}
+      {orders.length===0&&!loading&&(
+        <div style={{padding:24,textAlign:"center",color:"#A0AEC0"}}>
+          <div style={{fontSize:32,marginBottom:12}}>📦</div>
+          <div style={{fontSize:13,fontWeight:600,color:"#4A5568",marginBottom:6}}>Aucune commande en attente</div>
+          <div style={{fontSize:12,marginBottom:16}}>Cliquez sur <strong>"🔄 Synchroniser"</strong> pour importer les commandes gagnées depuis Axonaut.</div>
+          <div style={{fontSize:11,color:"#CBD5E0",background:"#F7F4F0",borderRadius:8,padding:"8px 12px",textAlign:"left"}}>
+            <div style={{fontWeight:600,marginBottom:4}}>⚠️ Vérifiez que :</div>
+            <div>• La variable <code>AXONAUT_API_KEY</code> est configurée dans Vercel</div>
+            <div>• Le fichier <code>api/axonaut.js</code> est bien dans votre dépôt GitHub</div>
+          </div>
+        </div>
+      )}
+
+      {/* Liste des commandes */}
+      <div style={{overflowY:"auto",flex:1}}>
+        {orders.map(order=>(
+          <div key={order.key} style={{padding:"12px 14px",borderBottom:"1px solid #F7F4F0"}}>
+            <div style={{display:"flex",alignItems:"flex-start",gap:10}}>
+              {/* Infos commande */}
+              <div style={{flex:1,minWidth:0}}>
+                <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:3}}>
+                  <div style={{fontSize:13,fontWeight:700,color:"#1A1A2E",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{order.client}</div>
+                  {order.amount>0&&<span style={{fontSize:11,fontWeight:700,color:"#F59E0B",flexShrink:0}}>{fmtAmount(order.amount)}</span>}
+                </div>
+                {order.description&&<div style={{fontSize:12,color:"#718096",marginBottom:3,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{order.description}</div>}
+                <div style={{display:"flex",gap:8,fontSize:10,color:"#A0AEC0",flexWrap:"wrap"}}>
+                  {order.reference&&<span>Réf. {order.reference}</span>}
+                  {order.createdAt&&<span>Créée le {new Date(order.createdAt).toLocaleDateString("fr-FR")}</span>}
+                  <span>Importée {fmtImportDate(order.importedAt)}</span>
+                </div>
+              </div>
+            </div>
+
+            {/* Actions */}
+            <div style={{display:"flex",gap:6,marginTop:10}}>
+              <button onClick={()=>onAssign(order)}
+                style={{flex:3,padding:"8px",borderRadius:8,border:"none",background:"#1A1A2E",color:"white",fontWeight:700,cursor:"pointer",fontSize:12}}>
+                📅 Affecter à une machine
+              </button>
+              <button onClick={()=>onDiscard(order)}
+                title="Ignorer cette commande"
+                style={{flex:1,padding:"8px",borderRadius:8,border:"1.5px solid #E2E8F0",background:"white",color:"#718096",fontWeight:600,cursor:"pointer",fontSize:12}}>
+                🗑 Ignorer
+              </button>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* Footer aide */}
+      <div style={{padding:"8px 14px",borderTop:"1px solid #F0EDE8",background:"#FAFAF8",fontSize:10,color:"#A0AEC0",textAlign:"center"}}>
+        Seules les commandes "Gagnées/Acceptées" dans Axonaut sont importées
       </div>
     </div>
   );
