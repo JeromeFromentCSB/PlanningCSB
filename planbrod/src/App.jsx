@@ -370,36 +370,61 @@ export default function App(){
   const importFromAxonaut=async()=>{
     setAxonautLoading(true); setAxonautMsg("");
     try{
-      const res=await fetch("/api/axonaut?endpoint=opportunities&limit=100");
+      // Factures Axonaut (invoices) = les commandes de broderie
+      const res=await fetch("/api/axonaut?endpoint=invoices&limit=100");
       if(!res.ok)throw new Error("HTTP "+res.status);
       const raw=await res.json();
-      // L'API peut retourner un tableau direct ou { data:[...] }
-      const orders=Array.isArray(raw)?raw:(raw.data||raw.results||raw.opportunities||[]);
+      const invoices=Array.isArray(raw)?raw:(raw.data||raw.results||[]);
+
       const existingPending=Object.keys(pendingOrders||{});
       const existingJobs=jobsList.map(j=>String(j.axonautId)).filter(Boolean);
-      let added=0;
-      for(const opp of orders){
-        const id=String(opp.id||opp.uid||"");
-        if(!id||existingPending.includes(id)||existingJobs.includes(id))continue;
-        // Statuts "Gagné" / "Won" = commande confirmée
-        const st=(opp.status||opp.state||opp.status_label||"").toLowerCase();
-        const isWon=!st||st.includes("won")||st.includes("gagn")||st.includes("accept")||st.includes("confirm");
-        if(!isWon)continue;
+      let added=0, skipped=0;
+
+      for(const inv of invoices){
+        const id=String(inv.id||"");
+        if(!id)continue;
+
+        // Ne garder que les factures NON payées (travail à réaliser)
+        if(inv.paid_date!==null&&inv.paid_date!==undefined){skipped++;continue;}
+
+        // Déjà importé ou déjà planifié ?
+        if(existingPending.includes(id)||existingJobs.includes(id)){continue;}
+
+        // Construire la description depuis les lignes de facture
+        // Exclure les lignes transport/livraison
+        const EXCLUDE=["transport","livraison","frais","port","shipping"];
+        const lines=(inv.invoice_lines||[])
+          .filter(l=>!EXCLUDE.some(ex=>l.name?.toLowerCase().includes(ex)))
+          .map(l=>`${l.name} ×${l.quantity}`)
+          .join(", ");
+
+        // Extraire les lignes de broderie pour info rapide
+        const brodyLines=(inv.invoice_lines||[])
+          .filter(l=>l.name?.toLowerCase().includes("broder")||l.name?.toLowerCase().includes("dtf"))
+          .map(l=>`${l.name} ×${l.quantity}`)
+          .join(", ");
+
         await set(ref(db,`pendingOrders/${id}`),{
-          axonautId:id,
-          client:opp.company?.name||opp.customer?.name||opp.contact?.name||"Client",
-          description:opp.name||opp.title||opp.subject||"",
-          amount:opp.amount||opp.total_amount||opp.price||0,
-          reference:opp.reference||opp.number||id,
-          createdAt:opp.created_at||opp.date||"",
-          importedAt:Date.now(),
-          rawStatus:opp.status||opp.state||"",
+          axonautId:    id,
+          client:       inv.company?.name||"Client inconnu",
+          description:  lines||brodyLines||inv.number||"",
+          broderie:     brodyLines,   // lignes broderie/DTF uniquement
+          amount:       inv.total||0,
+          reference:    inv.number||id,
+          invoiceDate:  inv.date||"",
+          dueDate:      inv.due_date||"",
+          importedAt:   Date.now(),
         });
         added++;
       }
-      setAxonautMsg(added>0?`✅ ${added} commande${added>1?"s":""} importée${added>1?"s":""} avec succès.`:`ℹ️ Aucune nouvelle commande. (${orders.length} vérifiées)`);
+
+      if(added>0)
+        setAxonautMsg(`✅ ${added} facture${added>1?"s":""} importée${added>1?"s":""} (${skipped} déjà payées ignorées).`);
+      else
+        setAxonautMsg(`ℹ️ Aucune nouvelle facture. (${invoices.length} vérifiées, ${skipped} déjà payées)`);
+
     }catch(e){
-      setAxonautMsg("❌ Erreur : "+e.message+". Vérifiez la variable AXONAUT_API_KEY dans Vercel.");
+      setAxonautMsg("❌ Erreur : "+e.message);
     }finally{setAxonautLoading(false);}
   };
 
@@ -1188,15 +1213,22 @@ function PendingOrdersPanel({orders,onImport,onAssign,onDiscard,loading,msg,onCl
             <div style={{display:"flex",alignItems:"flex-start",gap:10}}>
               {/* Infos commande */}
               <div style={{flex:1,minWidth:0}}>
-                <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:3}}>
+                <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:4}}>
                   <div style={{fontSize:13,fontWeight:700,color:"#1A1A2E",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{order.client}</div>
-                  {order.amount>0&&<span style={{fontSize:11,fontWeight:700,color:"#F59E0B",flexShrink:0}}>{fmtAmount(order.amount)}</span>}
+                  {order.amount>0&&<span style={{fontSize:12,fontWeight:700,color:"#F59E0B",flexShrink:0,background:"#FFF9EB",padding:"1px 6px",borderRadius:5}}>{fmtAmount(order.amount)}</span>}
                 </div>
-                {order.description&&<div style={{fontSize:12,color:"#718096",marginBottom:3,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{order.description}</div>}
+                {/* Lignes broderie/DTF en évidence */}
+                {order.broderie&&(
+                  <div style={{fontSize:12,fontWeight:600,color:"#1D4ED8",background:"#EFF6FF",borderRadius:6,padding:"3px 8px",marginBottom:4,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                    🧵 {order.broderie}
+                  </div>
+                )}
+                {/* Toutes les lignes */}
+                {order.description&&<div style={{fontSize:11,color:"#718096",marginBottom:4,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{order.description}</div>}
                 <div style={{display:"flex",gap:8,fontSize:10,color:"#A0AEC0",flexWrap:"wrap"}}>
-                  {order.reference&&<span>Réf. {order.reference}</span>}
-                  {order.createdAt&&<span>Créée le {new Date(order.createdAt).toLocaleDateString("fr-FR")}</span>}
-                  <span>Importée {fmtImportDate(order.importedAt)}</span>
+                  {order.reference&&<span style={{background:"#F7F4F0",padding:"1px 5px",borderRadius:4,fontWeight:600}}>{order.reference}</span>}
+                  {order.invoiceDate&&<span>📅 {new Date(order.invoiceDate).toLocaleDateString("fr-FR")}</span>}
+                  {order.dueDate&&<span>⏰ Échéance {new Date(order.dueDate).toLocaleDateString("fr-FR")}</span>}
                 </div>
               </div>
             </div>
@@ -1219,7 +1251,7 @@ function PendingOrdersPanel({orders,onImport,onAssign,onDiscard,loading,msg,onCl
 
       {/* Footer aide */}
       <div style={{padding:"8px 14px",borderTop:"1px solid #F0EDE8",background:"#FAFAF8",fontSize:10,color:"#A0AEC0",textAlign:"center"}}>
-        Seules les commandes "Gagnées/Acceptées" dans Axonaut sont importées
+        Seules les factures non payées sont importées · Les lignes transport sont exclues
       </div>
     </div>
   );
