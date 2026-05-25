@@ -372,9 +372,10 @@ export default function App(){
   const importFromAxonaut=async()=>{
     setAxonautLoading(true); setAxonautMsg("");
     try{
-      // Factures Axonaut (invoices) = les commandes de broderie
-      const res=await fetch("/api/axonaut?endpoint=invoices&limit=100");
-      if(!res.ok)throw new Error("HTTP "+res.status);
+      // Essai avec "quotations" puis "quotes" si 404
+      let res=await fetch("/api/axonaut?endpoint=quotations&limit=100");
+      if(res.status===404) res=await fetch("/api/axonaut?endpoint=quotes&limit=100");
+      if(!res.ok)throw new Error("Endpoint devis introuvable (essayé: quotations, quotes). HTTP "+res.status);
       const raw=await res.json();
       const invoices=Array.isArray(raw)?raw:(raw.data||raw.results||[]);
 
@@ -386,8 +387,10 @@ export default function App(){
         const id=String(inv.id||"");
         if(!id)continue;
 
-        // Ne garder que les factures NON payées (travail à réaliser)
-        if(inv.paid_date!==null&&inv.paid_date!==undefined){skipped++;continue;}
+        // Ne garder que les devis ACCEPTÉS (statut accepted/signed/won)
+        const status=(inv.status||inv.state||inv.status_label||"").toLowerCase();
+        const isAccepted=status.includes("accept")||status.includes("sign")||status.includes("won")||status.includes("gagn")||status.includes("valid");
+        if(!isAccepted){skipped++;continue;}
 
         // Déjà importé ou déjà planifié ?
         if(existingPending.includes(id)||existingJobs.includes(id)){continue;}
@@ -428,9 +431,9 @@ export default function App(){
       }
 
       if(added>0)
-        setAxonautMsg(`✅ ${added} facture${added>1?"s":""} importée${added>1?"s":""} (${skipped} déjà payées ignorées).`);
+        setAxonautMsg(`✅ ${added} devis importé${added>1?"s":""} avec succès. (${skipped} ignorés car non acceptés)`);
       else
-        setAxonautMsg(`ℹ️ Aucune nouvelle facture. (${invoices.length} vérifiées, ${skipped} déjà payées)`);
+        setAxonautMsg(`ℹ️ Aucun nouveau devis accepté. (${invoices.length} vérifiés, ${skipped} non acceptés)`);
 
     }catch(e){
       setAxonautMsg("❌ Erreur : "+e.message);
