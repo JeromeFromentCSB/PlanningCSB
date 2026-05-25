@@ -164,7 +164,8 @@ export default function App(){
   const [userProfile,  setUserProfile]  = useState(null);
   const [machines,     setMachines]     = useState(DEFAULT_MACHINES);
   const [allJobs,      setAllJobs]      = useState({});
-  const [workingHours, setWorkingHours] = useState(DEFAULT_WH);
+  const [workingHours,    setWorkingHours]    = useState(DEFAULT_WH);
+  const [axonautFilters,  setAxonautFilters]  = useState([]); // codes produits à importer
   const [notifs,       setNotifs]       = useState({});
   const [allUsers,     setAllUsers]     = useState({});
   const [dateKey,      setDateKey]      = useState(todayKey());
@@ -213,6 +214,7 @@ export default function App(){
   },[authUser]);
 
   // ── Horaires ──────────────────────────────────────────────────────
+  useEffect(()=>{if(!authUser)return;return onValue(ref(db,"settings/axonautFilters"),(snap)=>{const d=snap.val();setAxonautFilters(Array.isArray(d)?d:(d?Object.values(d):[]));});},[authUser]);
   useEffect(()=>{if(!authUser)return;return onValue(ref(db,"settings/workingHours"),(snap)=>{const d=snap.val();if(d)setWorkingHours({...DEFAULT_WH,...d});});},[authUser]);
 
   // ── Jobs globaux ──────────────────────────────────────────────────
@@ -390,25 +392,32 @@ export default function App(){
         // Déjà importé ou déjà planifié ?
         if(existingPending.includes(id)||existingJobs.includes(id)){continue;}
 
-        // Construire la description depuis les lignes de facture
-        // Exclure les lignes transport/livraison
-        const EXCLUDE=["transport","livraison","frais","port","shipping"];
-        const lines=(inv.invoice_lines||[])
-          .filter(l=>!EXCLUDE.some(ex=>l.name?.toLowerCase().includes(ex)))
-          .map(l=>`${l.name} ×${l.quantity}`)
-          .join(", ");
+        // Filtrer les lignes selon les codes produits configurés dans l'admin
+        const allLines=inv.invoice_lines||[];
+        const EXCLUDE_NAMES=["transport","livraison","frais","port","shipping"];
+        const filteredLines = axonautFilters.length>0
+          // Mode liste blanche : seulement les codes configurés
+          ? allLines.filter(l=>axonautFilters.some(code=>l.product_code?.toUpperCase()===code.toUpperCase()))
+          // Mode par défaut : exclure les lignes transport/logistique
+          : allLines.filter(l=>!EXCLUDE_NAMES.some(ex=>l.name?.toLowerCase().includes(ex)));
 
-        // Extraire les lignes de broderie pour info rapide
-        const brodyLines=(inv.invoice_lines||[])
+        // Si aucune ligne ne correspond aux filtres, ignorer cette facture
+        if(filteredLines.length===0){skipped++;continue;}
+
+        const lines=filteredLines.map(l=>`${l.name} ×${l.quantity}`).join(", ");
+        // Résumé des codes produits importés
+        const codes=[...new Set(filteredLines.map(l=>l.product_code).filter(Boolean))].join(", ");
+        // Lignes broderie pour affichage rapide
+        const brodyLines=filteredLines
           .filter(l=>l.name?.toLowerCase().includes("broder")||l.name?.toLowerCase().includes("dtf"))
-          .map(l=>`${l.name} ×${l.quantity}`)
-          .join(", ");
+          .map(l=>`${l.name} ×${l.quantity}`).join(", ");
 
         await set(ref(db,`pendingOrders/${id}`),{
           axonautId:    id,
           client:       inv.company?.name||"Client inconnu",
-          description:  lines||brodyLines||inv.number||"",
-          broderie:     brodyLines,   // lignes broderie/DTF uniquement
+          description:  lines||inv.number||"",
+          broderie:     brodyLines||lines,
+          productCodes: codes,
           amount:       inv.total||0,
           reference:    inv.number||id,
           invoiceDate:  inv.date||"",
@@ -501,7 +510,7 @@ export default function App(){
 
       {showPending&&role==="admin"&&<PendingOrdersPanel orders={pendingOrdersList} onImport={importFromAxonaut} onAssign={assignOrder} onDiscard={discardOrder} loading={axonautLoading} msg={axonautMsg} onClose={()=>setShowPending(false)}/>}
       {showNotifs&&role==="admin"&&<NotifPanel notifs={notifsList} onMarkRead={markAllRead} onDelete={deleteNotif} onDeleteAll={deleteAllNotifs} onClose={()=>setShowNotifs(false)}/>}
-      {showAdmin &&role==="admin"&&<AdminPanel allUsers={allUsers} workingHours={workingHours} machines={machines} onClose={()=>setShowAdmin(false)}/>}
+      {showAdmin &&role==="admin"&&<AdminPanel allUsers={allUsers} workingHours={workingHours} machines={machines} axonautFilters={axonautFilters} onClose={()=>setShowAdmin(false)}/>}
 
       {view==="planning"&&<PlanningView monoM={monoM} multiM={multiM} dayJobs={dayJobs} dateKey={dateKey} wh={wh} dayActive={dayActive} workingHours={workingHours} machines={machines} openAdd={openAdd} openEdit={openEdit} {...dragProps}/>}
       {view==="semaine" &&<WeekView monoM={monoM} multiM={multiM} allJobs={jobsList} mondayKey={getMondayKey(dateKey)} workingHours={workingHours} machines={machines} openAdd={openAdd} openEdit={openEdit} onDayClick={(dk)=>{setDateKey(dk);setView("planning");}} {...dragProps}/>}
@@ -986,7 +995,7 @@ function RecapView({dayJobs,allJobs,machines,dateKey,workingHours}){
 }
 
 // ─── Admin Panel ───────────────────────────────────────────────────────────────
-function AdminPanel({allUsers,workingHours,machines,onClose}){
+function AdminPanel({allUsers,workingHours,machines,axonautFilters,onClose}){
   const [tab,setTab]=useState("machines");
   const DN={0:"Dimanche",1:"Lundi",2:"Mardi",3:"Mercredi",4:"Jeudi",5:"Vendredi",6:"Samedi"};
   const AH=Array.from({length:15},(_,i)=>i+5);
@@ -1020,7 +1029,7 @@ function AdminPanel({allUsers,workingHours,machines,onClose}){
         <button onClick={onClose} style={{background:"rgba(255,255,255,0.15)",color:"white",border:"none",borderRadius:6,width:22,height:22,cursor:"pointer",fontSize:13}}>×</button>
       </div>
       <div style={{display:"flex",borderBottom:"1px solid #F0EDE8"}}>
-        {[["machines","🔧 Machines"],["users","👥 Utilisateurs"],["horaires","🕐 Horaires"]].map(([t,l])=>(
+        {[["machines","🔧 Machines"],["users","👥 Utilisateurs"],["horaires","🕐 Horaires"],["axonaut","🔗 Axonaut"]].map(([t,l])=>(
           <button key={t} onClick={()=>setTab(t)} style={{flex:1,padding:"9px 4px",border:"none",background:tab===t?"white":"#FAFAF8",fontWeight:tab===t?700:400,fontSize:11,cursor:"pointer",color:tab===t?"#1A1A2E":"#718096",borderBottom:tab===t?"2px solid #E07A5F":"2px solid transparent"}}>{l}</button>
         ))}
       </div>
@@ -1081,6 +1090,7 @@ function AdminPanel({allUsers,workingHours,machines,onClose}){
 
         {/* ── Utilisateurs ── */}
         {tab==="users"&&<UsersTab allUsers={allUsers}/>}
+        {tab==="axonaut"&&<AxonautFiltersTab filters={axonautFilters}/>}
 
         {/* ── Horaires ── */}
         {tab==="horaires"&&(
@@ -1154,6 +1164,101 @@ function AdminPanel({allUsers,workingHours,machines,onClose}){
             })}
           </>
         )}
+      </div>
+    </div>
+  );
+}
+
+// ─── Onglet filtres produits Axonaut ─────────────────────────────────────────
+function AxonautFiltersTab({filters}){
+  const [newCode,setNewCode]=useState("");
+  const [err,    setErr    ]=useState("");
+
+  const saveFilters=async(newList)=>{
+    // Stocker comme objet indexé (Firebase ne supporte pas les tableaux vides)
+    const obj=newList.reduce((acc,code,i)=>({...acc,[i]:code}),{});
+    await set(ref(db,"settings/axonautFilters"),newList.length>0?obj:null);
+  };
+
+  const addCode=async()=>{
+    const code=newCode.trim().toUpperCase();
+    if(!code){setErr("Entrez un code produit.");return;}
+    if(filters.includes(code)){setErr("Ce code est déjà dans la liste.");return;}
+    setErr("");
+    await saveFilters([...filters,code]);
+    setNewCode("");
+  };
+
+  const removeCode=async(code)=>{
+    await saveFilters(filters.filter(c=>c!==code));
+  };
+
+  return(
+    <div>
+      <div style={{fontSize:11,color:"#718096",marginBottom:12,background:"#F7F4F0",borderRadius:8,padding:"8px 10px",lineHeight:1.5}}>
+        <strong>Comment ça marche :</strong><br/>
+        • Si la liste est <strong>vide</strong> → toutes les lignes sont importées (sauf transport/livraison)<br/>
+        • Si la liste contient des codes → <strong>seules les lignes avec ces codes</strong> sont importées<br/>
+        • Les factures sans aucune ligne correspondante sont ignorées
+      </div>
+
+      {/* Codes actuels */}
+      {filters.length===0?(
+        <div style={{textAlign:"center",padding:"16px 0",color:"#A0AEC0",fontSize:12}}>
+          Aucun filtre actif — toutes les lignes sont importées
+        </div>
+      ):(
+        <div style={{marginBottom:14}}>
+          <div style={{fontSize:11,fontWeight:600,color:"#4A5568",marginBottom:8}}>
+            Codes actifs ({filters.length}) :
+          </div>
+          <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
+            {filters.map(code=>(
+              <div key={code} style={{display:"flex",alignItems:"center",gap:5,background:"#EFF6FF",border:"1.5px solid #BFDBFE",borderRadius:7,padding:"4px 10px"}}>
+                <code style={{fontSize:12,fontWeight:700,color:"#1D4ED8"}}>{code}</code>
+                <button onClick={()=>removeCode(code)}
+                  style={{background:"none",border:"none",cursor:"pointer",color:"#93C5FD",fontSize:14,lineHeight:1,padding:0,fontWeight:700}}>×</button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Ajouter un code */}
+      <div style={{background:"#F7F9FC",borderRadius:10,padding:12,border:"1.5px solid #E2E8F0"}}>
+        <div style={{fontSize:11,fontWeight:700,color:"#4A5568",marginBottom:8}}>
+          ➕ Ajouter un code produit Axonaut
+        </div>
+        <div style={{display:"flex",gap:8}}>
+          <input value={newCode} onChange={e=>{setNewCode(e.target.value.toUpperCase());setErr("");}}
+            onKeyDown={e=>e.key==="Enter"&&addCode()}
+            placeholder="Ex: BRODDOS, BRODCOEUR, POSEDTF…"
+            style={{flex:1,padding:"8px 10px",borderRadius:8,border:"1.5px solid #E2E8F0",fontSize:12,boxSizing:"border-box",fontFamily:"monospace"}}/>
+          <button onClick={addCode}
+            style={{padding:"8px 14px",borderRadius:8,border:"none",background:"#1A1A2E",color:"white",fontWeight:700,cursor:"pointer",fontSize:12,flexShrink:0}}>
+            Ajouter
+          </button>
+        </div>
+        {err&&<div style={{fontSize:11,color:"#991B1B",marginTop:5}}>{err}</div>}
+      </div>
+
+      {/* Codes détectés dans vos données - aide */}
+      <div style={{marginTop:14,background:"#FFFBEB",border:"1px solid #FDE68A",borderRadius:8,padding:"10px 12px"}}>
+        <div style={{fontSize:11,fontWeight:700,color:"#92400E",marginBottom:6}}>
+          💡 Codes produits détectés dans vos factures Axonaut
+        </div>
+        <div style={{display:"flex",flexWrap:"wrap",gap:4}}>
+          {["BRODDOS","BRODCOEUR","POSEDTF","FOURNDTF","BC09T","PK769"].map(code=>(
+            <code key={code} onClick={()=>{if(!filters.includes(code)){setNewCode(code);}}}
+              style={{fontSize:11,background:"#FEF3C7",border:"1px solid #FDE68A",borderRadius:5,padding:"2px 7px",cursor:"pointer",color:"#92400E",fontWeight:600}}
+              title="Cliquer pour pré-remplir">
+              {code}
+            </code>
+          ))}
+        </div>
+        <div style={{fontSize:10,color:"#B45309",marginTop:5}}>
+          Cliquez sur un code pour le pré-remplir dans le champ · Synchronisez d'abord pour voir vos vrais codes
+        </div>
       </div>
     </div>
   );
